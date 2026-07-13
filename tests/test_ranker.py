@@ -1,0 +1,89 @@
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+import pytest
+
+xgboost = pytest.importorskip("xgboost")
+
+
+def test_ranker_trains_and_predicts_grouped_candidates(tmp_path) -> None:
+    from otto_recsys.ranking import RankerModel, train_ranker
+
+    features = np.asarray([[2.0], [0.0], [1.5], [0.1]], dtype=np.float32)
+    labels = np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+
+    model = train_ranker(
+        features,
+        labels,
+        [2, 2],
+        ["score"],
+        validation_features=features,
+        validation_labels=labels,
+        validation_group_sizes=[2, 2],
+        rounds=5,
+        early_stopping_rounds=2,
+    )
+    predictions = model.predict(features)
+    model_path = tmp_path / "ranker.json"
+    model.save(model_path)
+    loaded_predictions = RankerModel.load(model_path).predict(features)
+
+    assert predictions.shape == (4,)
+    assert np.isfinite(predictions).all()
+    np.testing.assert_allclose(loaded_predictions, predictions)
+
+
+def test_ranker_rejects_inconsistent_groups() -> None:
+    from otto_recsys.ranking import train_ranker
+
+    features = np.asarray([[1.0], [0.0]], dtype=np.float32)
+    labels = np.asarray([1.0, 0.0], dtype=np.float32)
+
+    with pytest.raises(ValueError, match="same rows"):
+        train_ranker(features, labels, [1], ["score"], rounds=1)
+
+
+def test_ranker_suite_writes_three_models_and_predictions(tmp_path: Path) -> None:
+    from otto_recsys.constants import EVENT_TYPES
+    from otto_recsys.ranking import train_ranker_suite
+
+    training = tmp_path / "training"
+    validation = tmp_path / "validation"
+    for root in (training, validation):
+        for target in EVENT_TYPES:
+            directory = root / target.value
+            directory.mkdir(parents=True)
+            pl.DataFrame(
+                {
+                    "session": [1, 1, 2, 2],
+                    "target": [target.value] * 4,
+                    "aid": [10, 11, 20, 21],
+                    "label": [1, 0, 1, 0],
+                    "candidate_score": [2.0, 0.0, 2.0, 0.0],
+                }
+            ).write_parquet(directory / "part-000000.parquet")
+    labels = tmp_path / "labels.parquet"
+    pl.DataFrame(
+        {
+            "session": [1, 1, 1, 2, 2, 2],
+            "type": [target.value for _ in range(2) for target in EVENT_TYPES],
+            "aid": [10, 10, 10, 20, 20, 20],
+        }
+    ).write_parquet(labels)
+    destination = tmp_path / "rankers"
+
+    result = train_ranker_suite(
+        training,
+        validation,
+        labels,
+        destination,
+        rounds=3,
+        early_stopping_rounds=1,
+    )
+
+    assert 0.0 <= result.weighted_recall_at_20 <= 1.0
+    for target in EVENT_TYPES:
+        assert (destination / f"{target.value}.json").exists()
+        assert (destination / f"{target.value}-predictions.parquet").exists()
+    assert (destination / "manifest.json").exists()
