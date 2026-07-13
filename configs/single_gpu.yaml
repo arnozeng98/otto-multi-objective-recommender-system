@@ -1,0 +1,12 @@
+extends: base.yaml
+
+project:
+  artifacts_dir: artifacts/single_gpu
+
+ranking:
+  device: cuda
+
+neural:
+  embedding_dim: 64
+  batch_size: 96
+  gradient_accumulation_steps: 6

@@ -203,6 +203,19 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# OTTO local data and generated artifacts
+data/*.jsonl
+data/sample_submission.csv
+artifacts/
+checkpoints/
+models/
+submissions/
+*.parquet
+*.arrow
+*.feather
+*.faiss
+*.ubj
+
 # Ruff stuff:
 .ruff_cache/
 

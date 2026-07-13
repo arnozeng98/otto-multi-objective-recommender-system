@@ -1,0 +1,35 @@
+project:
+  seed: 2026
+  artifacts_dir: artifacts
+  data_dir: data
+
+validation:
+  training_cutoff_timestamp_ms: 1660514400000
+  cutoff_timestamp_ms: 1661119200000
+  top_k: 20
+
+candidates:
+  total_budget: 250
+  history_budget: 50
+  popularity_budget: 40
+  covisitation_budget: 180
+
+covisitation:
+  max_events_per_session: 30
+  max_neighbors: 80
+  partitions: 64
+
+ranking:
+  device: cuda
+  max_depth: 8
+  learning_rate: 0.08
+  rounds: 500
+  training_candidate_limit: 80
+  validation_candidate_limit: 120
+
+neural:
+  embedding_dim: 64
+  max_sequence_length: 64
+  batch_size: 128
+  gradient_accumulation_steps: 4
+  precision: bf16

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "otto-recsys"
+version = "0.1.0"
+description = "A resource-aware multi-objective recommender for the Kaggle OTTO competition"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "CC0-1.0" }
+dependencies = [
+    "numpy>=2.1",
+    "orjson>=3.10",
+    "polars>=1.20",
+    "pyarrow>=18",
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+    "typer>=0.15",
+]
+
+[project.optional-dependencies]
+rank = ["xgboost>=3.0"]
+neural = ["faiss-cpu>=1.10", "torch>=2.7"]
+mamba = ["mamba-ssm>=2.2"]
+dev = ["mypy>=1.14", "pytest>=8.3", "ruff>=0.9"]
+
+[project.scripts]
+otto-recsys = "otto_recsys.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/otto_recsys"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["otto_recsys"]
+
+[[tool.mypy.overrides]]
+module = [
+    "faiss",
+    "mamba_ssm",
+    "mamba_ssm.*",
+    "pyarrow",
+    "pyarrow.*",
+    "torch",
+    "torch.*",
+    "xgboost",
+    "yaml",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["otto_recsys.neural.*"]
+disallow_subclassing_any = false

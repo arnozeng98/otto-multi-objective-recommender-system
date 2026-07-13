@@ -1,0 +1,11 @@
+extends: ../base.yaml
+
+project:
+  artifacts_dir: artifacts/research/tiger
+
+neural:
+  embedding_dim: 48
+  max_sequence_length: 48
+  batch_size: 48
+  gradient_accumulation_steps: 8
+  precision: bf16

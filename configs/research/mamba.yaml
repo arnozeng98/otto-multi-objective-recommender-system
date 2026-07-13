@@ -1,0 +1,11 @@
+extends: ../base.yaml
+
+project:
+  artifacts_dir: artifacts/research/mamba
+
+neural:
+  embedding_dim: 64
+  max_sequence_length: 96
+  batch_size: 64
+  gradient_accumulation_steps: 8
+  precision: bf16
