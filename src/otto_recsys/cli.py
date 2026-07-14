@@ -248,6 +248,7 @@ def run_validation_command(
     config_path: Annotated[Path, typer.Option("--config")] = Path("configs/single_gpu.yaml"),
     max_sessions: int | None = typer.Option(None, min=1),
     overwrite: bool = typer.Option(False, "--overwrite"),
+    no_progress: bool = typer.Option(False, "--no-progress"),
 ) -> None:
     """Run or resume the complete classical local-validation pipeline."""
     result = run_validation_pipeline(
@@ -256,6 +257,28 @@ def run_validation_command(
         load_config(config_path),
         max_sessions=max_sessions,
         overwrite=overwrite,
+        show_progress=not no_progress,
+    )
+    typer.echo(json.dumps(asdict(result), indent=2))
+
+
+@app.command("run")
+def run_command(
+    source: Annotated[Path, typer.Argument()],
+    destination: Annotated[Path, typer.Argument()],
+    config_path: Annotated[Path, typer.Option("--config")] = Path("configs/single_gpu.yaml"),
+    max_sessions: int | None = typer.Option(None, min=1),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    no_progress: bool = typer.Option(False, "--no-progress"),
+) -> None:
+    """Run or resume the complete nine-stage recommendation pipeline."""
+    result = run_validation_pipeline(
+        source,
+        destination,
+        load_config(config_path),
+        max_sessions=max_sessions,
+        overwrite=overwrite,
+        show_progress=not no_progress,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
 

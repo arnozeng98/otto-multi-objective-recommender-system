@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -84,6 +85,7 @@ def train_ranker_suite(
     training_candidate_limit: int = 80,
     validation_candidate_limit: int = 120,
     overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
 ) -> RankerSuiteResult:
     """Train one LambdaMART model per target and score local validation candidates."""
     if destination.exists() and not overwrite:
@@ -155,6 +157,8 @@ def train_ranker_suite(
                 predictions[(session_id, target)] = session_frame["aid"].head(20).to_list()
             training_rows[target.value] = len(training)
             validation_rows[target.value] = len(validation)
+            if progress is not None:
+                progress(1)
 
         recall = weighted_recall_at_k(predictions, _ground_truth(validation_labels), k=20)
         result = RankerSuiteResult(

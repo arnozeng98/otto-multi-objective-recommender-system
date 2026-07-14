@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,7 @@ def build_matrix_store_suite(
     destination: Path,
     *,
     overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
 ) -> MatrixStoreSuiteResult:
     """Convert every matrix in a co-visitation suite to memory-mapped storage."""
     if destination.exists() and not overwrite:
@@ -103,11 +105,21 @@ def build_matrix_store_suite(
     suite_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     names = sorted(suite_manifest["result"]["matrices"])
     temporary = destination.with_name(f"{destination.name}.tmp")
-    if temporary.exists():
+    if overwrite and temporary.exists():
         shutil.rmtree(temporary)
-    temporary.mkdir(parents=True)
+    temporary.mkdir(parents=True, exist_ok=True)
     try:
-        stores = {name: build_matrix_store(source / name, temporary / name) for name in names}
+        stores: dict[str, MatrixStoreBuildResult] = {}
+        for name in names:
+            child = temporary / name
+            if (child / "manifest.json").exists():
+                payload = json.loads((child / "manifest.json").read_text(encoding="utf-8"))
+                stores[name] = MatrixStoreBuildResult(**payload["result"])
+            else:
+                shutil.rmtree(child, ignore_errors=True)
+                stores[name] = build_matrix_store(source / name, child)
+            if progress is not None:
+                progress(1)
         result = MatrixStoreSuiteResult(stores=stores)
         manifest = {
             "stage": "matrix_store_suite",
@@ -124,7 +136,6 @@ def build_matrix_store_suite(
         shutil.move(str(temporary), str(destination))
         return result
     except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
         raise
 
 

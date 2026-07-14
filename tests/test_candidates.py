@@ -155,3 +155,124 @@ def test_materialize_candidates_writes_labeled_target_partitions(tmp_path: Path)
     assert result.positives["carts"] == 1
     assert result.positives["orders"] == 1
     assert result.positives["clicks"] == 0
+
+
+def test_candidate_materialization_resumes_synchronized_checkpoint(tmp_path: Path) -> None:
+    source = tmp_path / "sessions.jsonl"
+    records = [
+        {
+            "session": session,
+            "events": [
+                {"aid": 10, "ts": 100, "type": "clicks"},
+                {"aid": 20 + session, "ts": 200, "type": "orders"},
+            ],
+        }
+        for session in range(1, 5)
+    ]
+    source.write_text("\n".join(map(json.dumps, records)) + "\n", encoding="utf-8")
+    parquet = tmp_path / "events.parquet"
+    view = tmp_path / "view"
+    matrices = tmp_path / "matrices"
+    stores = tmp_path / "stores"
+    destination = tmp_path / "candidates"
+    convert_jsonl_to_parquet(source, parquet, batch_events=1)
+    materialize_temporal_split(parquet, view, 150)
+    build_covisitation_suite(
+        view / "matrix_events.parquet",
+        matrices,
+        max_neighbors=2,
+        partitions=2,
+        pair_buffer_size=1,
+        batch_rows=1,
+    )
+    build_matrix_store_suite(matrices, stores)
+
+    materialize_candidates(
+        view,
+        stores,
+        destination,
+        budget=3,
+        popularity_budget=2,
+        batch_rows=3,
+    )
+    completed = {
+        target.value: pl.read_parquet(destination / target.value / "*.parquet")
+        for target in EventType
+    }
+    destination.rename(destination.with_name("candidates.tmp"))
+
+    resumed = materialize_candidates(
+        view,
+        stores,
+        destination,
+        budget=3,
+        popularity_budget=2,
+        batch_rows=3,
+    )
+
+    assert resumed.sessions == 4
+    for target in EventType:
+        actual = pl.read_parquet(destination / target.value / "*.parquet")
+        assert actual.equals(completed[target.value])
+
+
+def test_candidate_materialization_salvages_legacy_corrupt_tail(tmp_path: Path) -> None:
+    source = tmp_path / "sessions.jsonl"
+    records = [
+        {
+            "session": session,
+            "events": [
+                {"aid": 10, "ts": 100, "type": "clicks"},
+                {"aid": 30 + session, "ts": 200, "type": "orders"},
+            ],
+        }
+        for session in range(1, 5)
+    ]
+    source.write_text("\n".join(map(json.dumps, records)) + "\n", encoding="utf-8")
+    parquet = tmp_path / "events.parquet"
+    view = tmp_path / "view"
+    matrices = tmp_path / "matrices"
+    stores = tmp_path / "stores"
+    destination = tmp_path / "candidates"
+    convert_jsonl_to_parquet(source, parquet, batch_events=1)
+    materialize_temporal_split(parquet, view, 150)
+    build_covisitation_suite(
+        view / "matrix_events.parquet",
+        matrices,
+        max_neighbors=2,
+        partitions=2,
+        pair_buffer_size=1,
+        batch_rows=1,
+    )
+    build_matrix_store_suite(matrices, stores)
+    materialize_candidates(
+        view,
+        stores,
+        destination,
+        budget=3,
+        popularity_budget=2,
+        batch_rows=1,
+    )
+    expected = {
+        target.value: pl.read_parquet(destination / target.value / "*.parquet")
+        for target in EventType
+    }
+    temporary = destination.with_name("candidates.tmp")
+    destination.rename(temporary)
+    (temporary / "checkpoint.json").unlink()
+    cart_tail = sorted((temporary / "carts").glob("part-*.parquet"))[-1]
+    cart_tail.write_bytes(b"interrupted")
+
+    result = materialize_candidates(
+        view,
+        stores,
+        destination,
+        budget=3,
+        popularity_budget=2,
+        batch_rows=1,
+    )
+
+    assert result.sessions == 4
+    for target in EventType:
+        actual = pl.read_parquet(destination / target.value / "*.parquet")
+        assert actual.equals(expected[target.value])

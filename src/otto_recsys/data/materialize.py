@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ def materialize_temporal_split(
     label_end_timestamp_ms: int | None = None,
     batch_rows: int = 250_000,
     overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
 ) -> TemporalMaterializationResult:
     """Persist leakage-safe matrix events, query contexts, and labels."""
     if batch_rows < 1:
@@ -106,6 +108,8 @@ def materialize_temporal_split(
         ):
             for session in iter_parquet_sessions(source, batch_rows=batch_rows):
                 source_sessions += 1
+                if progress is not None:
+                    progress(1)
                 matrix_rows.extend(
                     _event_row(session.session, event)
                     for event in session.events
@@ -183,6 +187,7 @@ def materialize_validation_views(
     *,
     batch_rows: int = 250_000,
     overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
 ) -> ValidationViewsResult:
     """Atomically publish ranker-training and local-validation temporal views."""
     if training_cutoff_timestamp_ms >= validation_cutoff_timestamp_ms:
@@ -201,12 +206,14 @@ def materialize_validation_views(
             training_cutoff_timestamp_ms,
             label_end_timestamp_ms=validation_cutoff_timestamp_ms,
             batch_rows=batch_rows,
+            progress=progress,
         )
         local_validation = materialize_temporal_split(
             source,
             temporary / "local_validation",
             validation_cutoff_timestamp_ms,
             batch_rows=batch_rows,
+            progress=progress,
         )
         result = ValidationViewsResult(
             ranker_train=ranker_train,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -182,6 +182,7 @@ def build_covisitation_suite(
     pair_buffer_size: int = 500_000,
     batch_rows: int = 250_000,
     overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
 ) -> CovisitationSuiteResult:
     """Build and atomically publish all default co-visitation matrices."""
     from otto_recsys.covisitation.rules import default_rules
@@ -189,21 +190,28 @@ def build_covisitation_suite(
     if destination.exists() and not overwrite:
         raise FileExistsError(f"Destination already exists: {destination}")
     temporary = destination.with_name(f"{destination.name}.tmp")
-    if temporary.exists():
+    if overwrite and temporary.exists():
         shutil.rmtree(temporary)
-    temporary.mkdir(parents=True)
+    temporary.mkdir(parents=True, exist_ok=True)
     try:
-        matrices = {
-            name: build_partitioned_covisitation(
-                source,
-                temporary / name,
-                rule,
-                partitions=partitions,
-                pair_buffer_size=pair_buffer_size,
-                batch_rows=batch_rows,
-            )
-            for name, rule in default_rules(max_neighbors).items()
-        }
+        matrices: dict[str, PartitionedBuildResult] = {}
+        for name, rule in default_rules(max_neighbors).items():
+            child = temporary / name
+            if (child / "manifest.json").exists():
+                payload = json.loads((child / "manifest.json").read_text(encoding="utf-8"))
+                matrices[name] = PartitionedBuildResult(**payload["result"])
+            else:
+                shutil.rmtree(child, ignore_errors=True)
+                matrices[name] = build_partitioned_covisitation(
+                    source,
+                    child,
+                    rule,
+                    partitions=partitions,
+                    pair_buffer_size=pair_buffer_size,
+                    batch_rows=batch_rows,
+                )
+            if progress is not None:
+                progress(1)
         result = CovisitationSuiteResult(matrices=matrices)
         source_stat = source.stat()
         manifest = {
@@ -231,5 +239,4 @@ def build_covisitation_suite(
         shutil.move(str(temporary), str(destination))
         return result
     except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
         raise

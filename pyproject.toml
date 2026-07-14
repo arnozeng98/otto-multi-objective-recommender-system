@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow>=18",
     "pydantic>=2.10",
     "pyyaml>=6.0",
+    "rich>=13.9",
     "typer>=0.15",
 ]
 
