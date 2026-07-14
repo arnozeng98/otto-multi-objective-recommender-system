@@ -194,7 +194,7 @@ uv run otto-recsys check-config configs/research/sasrec.yaml
 Run the complete classical validation pipeline from JSONL through three evaluated rankers:
 
 ```bash
-uv run otto-recsys run-validation \
+uv run otto-recsys run \
 	data/train.jsonl \
 	artifacts/single_gpu/validation \
 	--config configs/single_gpu.yaml
@@ -202,7 +202,26 @@ uv run otto-recsys run-validation \
 
 Use `--max-sessions 1000` for a real-data acceptance slice. Repeating an identical completed
 command reuses every artifact. A different source, configuration, or session limit is rejected
-unless `--overwrite` is explicit.
+unless `--overwrite` is explicit. The terminal displays a Rich progress dashboard for all nine
+steps with the current step number, unit counts, elapsed time, and ETA. Use `--no-progress` for
+stable CI or redirected JSON output.
+
+Interrupted runs resume automatically. Completed stage manifests are reused, matrix/store suites
+reuse completed child rules, and candidate materialization checkpoints synchronized three-target
+Parquet shards at complete session boundaries. A damaged tail shard is discarded and recovery
+continues from the last session shared by clicks, carts, and orders. Do not pass `--overwrite`
+when resuming, because it intentionally discards all prior artifacts.
+
+From Windows, run the CUDA pipeline inside WSL while keeping the repository in the current
+workspace:
+
+```bash
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu \
+	--cd /mnt/c/Users/arnoz/Desktop/repos/otto-multi-objective-recommender-system \
+	-- /home/arnozeng/.venvs/otto/bin/python -m otto_recsys.cli run \
+	data/train.jsonl artifacts/single_gpu/full-validation \
+	--config configs/single_gpu.yaml
+```
 
 The verified 1,000-session acceptance run used the CPU smoke ranker profile for 20 boosting
 rounds and produced:

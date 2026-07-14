@@ -187,11 +187,20 @@ otto-recsys build-covisitation artifacts/events/train.parquet artifacts/covisita
 otto-recsys prepare-validation artifacts/events/train.parquet artifacts/validation/views --config configs/single_gpu.yaml
 otto-recsys build-covisitation-suite artifacts/validation/views/ranker_train/matrix_events.parquet artifacts/validation/matrices/ranker_train
 otto-recsys build-matrix-store artifacts/validation/matrices/ranker_train artifacts/validation/stores/ranker_train
-otto-recsys run-validation data/train.jsonl artifacts/single_gpu/validation --config configs/single_gpu.yaml
+otto-recsys run data/train.jsonl artifacts/single_gpu/validation --config configs/single_gpu.yaml
 otto-recsys smoke artifacts/smoke
 ```
 
-Long stages write immutable outputs plus a manifest. A stage may reuse output only when its configuration hash and all upstream fingerprints match.
+Long stages write immutable outputs plus a manifest. A stage may reuse output only when its
+configuration hash and all upstream fingerprints match. The nine-stage `run` command renders a
+Rich progress dashboard with step numbering, work units, elapsed time, and ETA; `--no-progress`
+keeps non-interactive output stable.
+
+Candidate shards are committed in synchronized three-target session chunks. An atomic checkpoint
+advances only after all clicks, carts, and orders shards are durable. On restart, invalid tail
+files are removed, all targets roll back to their greatest common complete session, and processing
+continues without duplicate or missing query groups. Matrix and store suites similarly retain
+completed child manifests across interruptions.
 
 ## 13. Failure Handling
 
@@ -201,6 +210,7 @@ Long stages write immutable outputs plus a manifest. A stage may reuse output on
 - Missing optional dependencies report installation guidance.
 - CUDA out-of-memory is handled by reducing profile batch size or enabling accumulation, never by changing model semantics silently.
 - Partial long-running output is written to a temporary path and promoted only after validation.
+- Power loss preserves the last atomic candidate checkpoint and completed matrix/store children.
 
 ## 14. Experiment Methodology
 

@@ -1,6 +1,6 @@
 PYTHON := python
 
-.PHONY: install check test smoke diagnostics
+.PHONY: install check test smoke diagnostics run
 
 install:
 	uv sync --extra dev --extra rank
@@ -18,3 +18,6 @@ smoke:
 
 diagnostics:
 	uv run otto-recsys diagnostics
+
+run:
+	uv run otto-recsys run data/train.jsonl artifacts/single_gpu/full-validation --config configs/single_gpu.yaml

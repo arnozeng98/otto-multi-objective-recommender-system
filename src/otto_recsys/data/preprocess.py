@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ def convert_jsonl_to_parquet(
     *,
     batch_events: int = 250_000,
     max_sessions: int | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> dict[str, int | str]:
     """Flatten session JSONL into Parquet without retaining the dataset in memory."""
     if batch_events < 1:
@@ -50,6 +52,8 @@ def convert_jsonl_to_parquet(
                 if max_sessions is not None and sessions >= max_sessions:
                     break
                 digest.update(line)
+                if progress is not None:
+                    progress(len(line))
                 payload = orjson.loads(line)
                 session_id = int(payload["session"])
                 sessions += 1
