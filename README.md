@@ -259,6 +259,8 @@ Modern models are candidate sources, not replacements for the full system. A sou
 - Candidate fusion is capped at roughly 200–350 unique items per session and target.
 - Ranker input keeps all positives plus the first 80 training candidates and first 120
 	validation candidates per query by default.
+- Ranker training and evaluation use deterministic 50,000-query samples per target by default
+	so dense XGBoost matrices remain within the verified 16 GB WSL memory allocation.
 - Research profiles run separately so a baseline iteration remains within several hours.
 
 The in-memory reference builder remains useful for tests and bounded slices. Full-data runs use

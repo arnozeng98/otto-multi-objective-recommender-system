@@ -32,6 +32,8 @@ def _read_target(
     limit: int,
     *,
     keep_positives: bool,
+    query_limit: int | None,
+    require_positive_query: bool,
 ) -> pl.DataFrame:
     frame = pl.scan_parquet(path / target.value / "*.parquet")
     if "candidate_rank" in frame.collect_schema().names():
@@ -39,6 +41,12 @@ def _read_target(
         if keep_positives:
             predicate = predicate | (pl.col("label") > 0)
         frame = frame.filter(predicate)
+    if query_limit is not None:
+        queries = frame.group_by("session").agg(pl.col("label").sum().alias("positives"))
+        if require_positive_query:
+            queries = queries.filter(pl.col("positives") > 0)
+        selected = queries.select("session").sort("session").head(query_limit).collect()
+        frame = frame.join(selected.lazy(), on="session", how="semi")
     return frame.sort("session").collect(engine="streaming")
 
 
@@ -84,6 +92,8 @@ def train_ranker_suite(
     early_stopping_rounds: int = 30,
     training_candidate_limit: int = 80,
     validation_candidate_limit: int = 120,
+    training_query_limit: int | None = 50_000,
+    validation_query_limit: int | None = 50_000,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> RankerSuiteResult:
@@ -105,6 +115,8 @@ def train_ranker_suite(
                     target,
                     training_candidate_limit,
                     keep_positives=True,
+                    query_limit=training_query_limit,
+                    require_positive_query=True,
                 )
             )
             validation = _read_target(
@@ -112,6 +124,8 @@ def train_ranker_suite(
                 target,
                 validation_candidate_limit,
                 keep_positives=False,
+                query_limit=validation_query_limit,
+                require_positive_query=False,
             )
             if training.is_empty() or validation.is_empty():
                 raise ValueError(f"Target {target.value} has no usable ranking rows")
@@ -152,15 +166,21 @@ def train_ranker_suite(
                 ["session", "score", "aid"],
                 descending=[False, True, False],
             )
-            for session_frame in ranked.partition_by("session", maintain_order=True):
-                session_id = int(session_frame["session"][0])
-                predictions[(session_id, target)] = session_frame["aid"].head(20).to_list()
+            for session_id, aid in ranked.select("session", "aid").iter_rows():
+                prediction = predictions.setdefault((int(session_id), target), [])
+                if len(prediction) < 20:
+                    prediction.append(int(aid))
             training_rows[target.value] = len(training)
             validation_rows[target.value] = len(validation)
             if progress is not None:
                 progress(1)
 
-        recall = weighted_recall_at_k(predictions, _ground_truth(validation_labels), k=20)
+        ground_truth = {
+            key: aids
+            for key, aids in _ground_truth(validation_labels).items()
+            if key in predictions
+        }
+        recall = weighted_recall_at_k(predictions, ground_truth, k=20)
         result = RankerSuiteResult(
             training_rows=training_rows,
             validation_rows=validation_rows,
@@ -178,6 +198,8 @@ def train_ranker_suite(
                     "seed": seed,
                     "training_candidate_limit": training_candidate_limit,
                     "validation_candidate_limit": validation_candidate_limit,
+                    "training_query_limit": training_query_limit,
+                    "validation_query_limit": validation_query_limit,
                 }
             ),
             "inputs": {

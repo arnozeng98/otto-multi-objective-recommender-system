@@ -152,8 +152,10 @@ Three target-specific XGBoost models use `rank:ndcg`, one query group per sessio
 trees, deterministic seeds, validation early stopping, and positive-preserving candidate
 limits. Training keeps every positive plus the first 80 fused candidates; validation keeps the
 first 120 by default while the metric denominator continues to use all original labels. Group
-sizes must sum exactly to the row count. GPU training is requested explicitly and must not
-silently fall back.
+sizes must sum exactly to the row count. The bounded workstation profile deterministically
+selects the first 50,000 eligible query sessions per target for training and evaluation; the
+ranker manifest records these limits. GPU training is requested explicitly and must not silently
+fall back.
 
 ## 11. Modern Retrieval Experiments
 

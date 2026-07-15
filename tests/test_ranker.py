@@ -80,9 +80,13 @@ def test_ranker_suite_writes_three_models_and_predictions(tmp_path: Path) -> Non
         destination,
         rounds=3,
         early_stopping_rounds=1,
+        training_query_limit=1,
+        validation_query_limit=1,
     )
 
     assert 0.0 <= result.weighted_recall_at_20 <= 1.0
+    assert result.training_rows == {target.value: 2 for target in EVENT_TYPES}
+    assert result.validation_rows == {target.value: 2 for target in EVENT_TYPES}
     for target in EVENT_TYPES:
         assert (destination / f"{target.value}.json").exists()
         assert (destination / f"{target.value}-predictions.parquet").exists()
