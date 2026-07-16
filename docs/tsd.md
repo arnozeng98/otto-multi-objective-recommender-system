@@ -189,14 +189,23 @@ otto-recsys build-covisitation artifacts/events/train.parquet artifacts/covisita
 otto-recsys prepare-validation artifacts/events/train.parquet artifacts/validation/views --config configs/single_gpu.yaml
 otto-recsys build-covisitation-suite artifacts/validation/views/ranker_train/matrix_events.parquet artifacts/validation/matrices/ranker_train
 otto-recsys build-matrix-store artifacts/validation/matrices/ranker_train artifacts/validation/stores/ranker_train
-otto-recsys run data/train.jsonl artifacts/single_gpu/validation --config configs/single_gpu.yaml
+otto-recsys run-validation data/train.jsonl artifacts/single_gpu/full-validation --config configs/single_gpu.yaml
+otto-recsys run artifacts/single_gpu/full-run --config configs/single_gpu.yaml
 otto-recsys smoke artifacts/smoke
 ```
 
 Long stages write immutable outputs plus a manifest. A stage may reuse output only when its
-configuration hash and all upstream fingerprints match. The nine-stage `run` command renders a
-Rich progress dashboard with step numbering, work units, elapsed time, and ETA; `--no-progress`
-keeps non-interactive output stable.
+configuration hash and all upstream fingerprints match. The `run-validation` command owns local
+temporal evaluation. The primary `run DESTINATION` command defaults to the repository train,
+test, sample-submission, and single-GPU profile paths, imports compatible validation artifacts,
+and continues through full-history retrieval, test inference, and an atomically validated
+`DESTINATION/submission/submission.csv`. Rich reports step numbering, work units, elapsed time,
+and ETA; `--no-progress` keeps non-interactive output stable.
+
+The `validated` model strategy reuses the evaluated temporal rankers. The optional `refit`
+strategy trains separately identified final models from complete query groups sampled across
+both temporal windows. Refit models never consume test events and do not inherit validation
+metrics that were measured on different model artifacts.
 
 Candidate shards are committed in synchronized three-target session chunks. An atomic checkpoint
 advances only after all clicks, carts, and orders shards are durable. On restart, invalid tail
@@ -213,6 +222,9 @@ completed child manifests across interruptions.
 - CUDA out-of-memory is handled by reducing profile batch size or enabling accumulation, never by changing model semantics silently.
 - Partial long-running output is written to a temporary path and promoted only after validation.
 - Power loss preserves the last atomic candidate checkpoint and completed matrix/store children.
+- Test inference writes atomic per-target prediction shards and resumes completed shards.
+- Submission output is written to a temporary CSV and promoted only after sample-order, coverage,
+	row-count, uniqueness, and label-count checks pass.
 
 ## 14. Experiment Methodology
 
@@ -245,8 +257,8 @@ The dataset contains anonymous session and product IDs rather than account ident
 
 - The measured 1,000-session weighted Recall@20 of 0.123803 is an engineering acceptance
 	result, not a leaderboard estimate.
-- Full-data co-visitation and lookup are bounded by partition, but full-data ranker runtime,
-	candidate storage, and peak DMatrix memory still require measurement.
+- Full-history matrix and test-candidate runtime remains CPU/NVMe-bound; GPU utilization is
+	expected primarily during XGBoost training/inference and optional neural workloads.
 - CUDA extension compatibility depends on Linux, installed PyTorch/CUDA versions, and Blackwell support.
 - Mamba is unavailable in the verified PyTorch 2.13/cu130 environment because neither a
 	compatible wheel nor a compatible local extension compiler/header combination is available.

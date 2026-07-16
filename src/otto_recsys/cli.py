@@ -23,6 +23,7 @@ from otto_recsys.data.materialize import (
     materialize_validation_views,
 )
 from otto_recsys.data.preprocess import convert_jsonl_to_parquet
+from otto_recsys.full_pipeline import run_full_pipeline
 from otto_recsys.pipeline import run_validation_pipeline
 from otto_recsys.ranking import train_ranker_suite
 from otto_recsys.smoke import run_smoke
@@ -207,6 +208,9 @@ def materialize_candidates_command(
         destination,
         budget=config.candidates.total_budget,
         popularity_budget=config.candidates.popularity_budget,
+        history_budget=config.candidates.history_budget,
+        covisitation_budget=config.candidates.covisitation_budget,
+        max_events_per_session=config.covisitation.max_events_per_session,
         batch_rows=batch_rows,
         overwrite=overwrite,
     )
@@ -236,6 +240,8 @@ def train_rankers_command(
         seed=config.project.seed,
         training_candidate_limit=config.ranking.training_candidate_limit,
         validation_candidate_limit=config.ranking.validation_candidate_limit,
+        training_query_limit=config.ranking.training_query_limit,
+        validation_query_limit=config.ranking.validation_query_limit,
         overwrite=overwrite,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
@@ -264,19 +270,33 @@ def run_validation_command(
 
 @app.command("run")
 def run_command(
-    source: Annotated[Path, typer.Argument()],
     destination: Annotated[Path, typer.Argument()],
+    train: Annotated[Path, typer.Option("--train")] = Path("data/train.jsonl"),
+    test: Annotated[Path, typer.Option("--test")] = Path("data/test.jsonl"),
+    sample_submission: Annotated[Path, typer.Option("--sample-submission")] = Path(
+        "data/sample_submission.csv"
+    ),
+    validation_run: Annotated[Path | None, typer.Option("--validation-run")] = None,
     config_path: Annotated[Path, typer.Option("--config")] = Path("configs/single_gpu.yaml"),
-    max_sessions: int | None = typer.Option(None, min=1),
+    model_strategy: Annotated[str | None, typer.Option("--model-strategy")] = None,
     overwrite: bool = typer.Option(False, "--overwrite"),
     no_progress: bool = typer.Option(False, "--no-progress"),
 ) -> None:
-    """Run or resume the complete nine-stage recommendation pipeline."""
-    result = run_validation_pipeline(
-        source,
+    """Run or resume training, test inference, and Kaggle submission output."""
+    config = load_config(config_path)
+    if model_strategy is not None:
+        if model_strategy not in {"validated", "refit"}:
+            raise typer.BadParameter("model strategy must be 'validated' or 'refit'")
+        config = config.model_copy(
+            update={"ranking": config.ranking.model_copy(update={"model_strategy": model_strategy})}
+        )
+    result = run_full_pipeline(
         destination,
-        load_config(config_path),
-        max_sessions=max_sessions,
+        config,
+        train=train,
+        test=test,
+        sample_submission=sample_submission,
+        validation_run=validation_run,
         overwrite=overwrite,
         show_progress=not no_progress,
     )

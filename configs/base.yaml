@@ -18,6 +18,8 @@ covisitation:
   max_events_per_session: 30
   max_neighbors: 80
   partitions: 64
+  pair_buffer_size: 500000
+  batch_rows: 250000
 
 ranking:
   device: cuda
@@ -26,6 +28,9 @@ ranking:
   rounds: 500
   training_candidate_limit: 80
   validation_candidate_limit: 120
+  training_query_limit: 50000
+  validation_query_limit: 50000
+  model_strategy: validated
 
 neural:
   embedding_dim: 64

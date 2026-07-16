@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -41,6 +41,8 @@ class CovisitationConfig(StrictModel):
     max_events_per_session: int = Field(default=30, ge=2)
     max_neighbors: int = Field(default=80, ge=1)
     partitions: int = Field(default=64, ge=1)
+    pair_buffer_size: int = Field(default=500_000, ge=1)
+    batch_rows: int = Field(default=250_000, ge=1)
 
 
 class RankingConfig(StrictModel):
@@ -50,6 +52,9 @@ class RankingConfig(StrictModel):
     rounds: int = Field(default=500, ge=1)
     training_candidate_limit: int = Field(default=80, ge=20)
     validation_candidate_limit: int = Field(default=120, ge=20)
+    training_query_limit: int = Field(default=50_000, ge=1)
+    validation_query_limit: int = Field(default=50_000, ge=1)
+    model_strategy: Literal["validated", "refit"] = "validated"
 
 
 class NeuralConfig(StrictModel):

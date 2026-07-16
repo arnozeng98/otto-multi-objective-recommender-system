@@ -191,20 +191,27 @@ uv run otto-recsys check-config configs/single_gpu.yaml
 uv run otto-recsys check-config configs/research/sasrec.yaml
 ```
 
-Run the complete classical validation pipeline from JSONL through three evaluated rankers:
+Run the complete classical pipeline from train/test JSONL through a validated Kaggle CSV:
 
 ```bash
 uv run otto-recsys run \
-	data/train.jsonl \
-	artifacts/single_gpu/validation \
+	artifacts/single_gpu/full-run \
 	--config configs/single_gpu.yaml
 ```
 
-Use `--max-sessions 1000` for a real-data acceptance slice. Repeating an identical completed
-command reuses every artifact. A different source, configuration, or session limit is rejected
-unless `--overwrite` is explicit. The terminal displays a Rich progress dashboard for all nine
-steps with the current step number, unit counts, elapsed time, and ETA. Use `--no-progress` for
-stable CI or redirected JSON output.
+The command defaults to `data/train.jsonl`, `data/test.jsonl`, and
+`data/sample_submission.csv`; override them with `--train`, `--test`, and
+`--sample-submission`. It imports a compatible completed validation run, builds full-history
+retrieval assets, generates and scores all test candidates, and atomically writes:
+
+```text
+artifacts/single_gpu/full-run/submission/submission.csv
+```
+
+Repeating an identical completed command reuses every artifact. A different source or
+configuration is rejected unless `--overwrite` is explicit. Use `--no-progress` for stable CI
+or redirected JSON output. Use `otto-recsys run-validation SOURCE DESTINATION` when only local
+temporal evaluation is required.
 
 Interrupted runs resume automatically. Completed stage manifests are reused, matrix/store suites
 reuse completed child rules, and candidate materialization checkpoints synchronized three-target
@@ -219,7 +226,7 @@ workspace:
 MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu \
 	--cd /mnt/c/Users/arnoz/Desktop/repos/otto-multi-objective-recommender-system \
 	-- /home/arnozeng/.venvs/otto/bin/python -m otto_recsys.cli run \
-	data/train.jsonl artifacts/single_gpu/full-validation \
+	artifacts/single_gpu/full-run \
 	--config configs/single_gpu.yaml
 ```
 
@@ -253,7 +260,8 @@ Modern models are candidate sources, not replacements for the full system. A sou
 ## Resource Strategy
 
 - CPU and NVMe handle JSON parsing, Parquet, co-visitation reduction, and feature materialization.
-- The GPU handles neural training and supported XGBoost histogram training.
+- The GPU handles XGBoost training/inference and optional neural workloads. Long ETL, matrix,
+	and candidate stages are CPU/NVMe-bound, so low GPU utilization during those stages is expected.
 - Neural item embeddings default to 48–64 dimensions.
 - Full item softmax is avoided; training uses sampled candidates and hard negatives.
 - Candidate fusion is capped at roughly 200–350 unique items per session and target.
@@ -294,6 +302,8 @@ Every test session produces exactly three rows:
 ```
 
 Labels are unique integer IDs, space delimited, and truncated to 20. Target-specific popularity provides deterministic backfill for short candidate lists.
+The writer follows the sample-submission session order, validates three rows per session, records
+the output SHA-256, and promotes the CSV only after all checks pass.
 
 ## Research Lineage
 

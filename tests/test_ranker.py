@@ -91,3 +91,71 @@ def test_ranker_suite_writes_three_models_and_predictions(tmp_path: Path) -> Non
         assert (destination / f"{target.value}.json").exists()
         assert (destination / f"{target.value}-predictions.parquet").exists()
     assert (destination / "manifest.json").exists()
+
+
+def test_inference_scores_candidate_shards_and_reuses_partial_outputs(tmp_path: Path) -> None:
+    from otto_recsys.constants import EVENT_TYPES
+    from otto_recsys.ranking import score_candidate_suite, train_ranker_suite
+
+    training = tmp_path / "training"
+    validation = tmp_path / "validation"
+    for root in (training, validation):
+        for target in EVENT_TYPES:
+            directory = root / target.value
+            directory.mkdir(parents=True)
+            pl.DataFrame(
+                {
+                    "session": [1, 1, 2, 2],
+                    "target": [target.value] * 4,
+                    "aid": [10, 11, 20, 21],
+                    "label": [1, 0, 1, 0],
+                    "candidate_score": [2.0, 0.0, 2.0, 0.0],
+                }
+            ).write_parquet(directory / "part-000000.parquet")
+    labels = tmp_path / "labels.parquet"
+    pl.DataFrame(
+        {
+            "session": [1, 1, 1, 2, 2, 2],
+            "type": [target.value for _ in range(2) for target in EVENT_TYPES],
+            "aid": [10, 10, 10, 20, 20, 20],
+        }
+    ).write_parquet(labels)
+    models = tmp_path / "models"
+    train_ranker_suite(training, validation, labels, models, rounds=2)
+
+    destination = tmp_path / "predictions"
+    result = score_candidate_suite(validation, models, destination, device="cpu")
+
+    assert result.sessions == {target.value: 2 for target in EVENT_TYPES}
+    for target in EVENT_TYPES:
+        output = pl.read_parquet(destination / target.value / "part-000000.parquet")
+        assert output.columns == ["session", "target", "aid", "score", "rank"]
+        assert output.group_by("session").len()["len"].max() <= 20
+
+
+def test_refit_combines_temporal_windows_as_distinct_queries(tmp_path: Path) -> None:
+    from otto_recsys.constants import EVENT_TYPES
+    from otto_recsys.ranking import refit_ranker_suite
+
+    sources = (tmp_path / "first", tmp_path / "second")
+    for source_index, root in enumerate(sources):
+        for target in EVENT_TYPES:
+            directory = root / target.value
+            directory.mkdir(parents=True)
+            pl.DataFrame(
+                {
+                    "session": [1, 1],
+                    "target": [target.value] * 2,
+                    "aid": [10 + source_index, 20 + source_index],
+                    "label": [1, 0],
+                    "candidate_score": [2.0, 0.0],
+                }
+            ).write_parquet(directory / "part-000000.parquet")
+
+    destination = tmp_path / "refit"
+    result = refit_ranker_suite(sources, destination, device="cpu", rounds=2, query_limit=2)
+
+    assert result.training_rows == {target.value: 4 for target in EVENT_TYPES}
+    for target in EVENT_TYPES:
+        assert (destination / f"{target.value}.json").exists()
+    assert (destination / "manifest.json").exists()

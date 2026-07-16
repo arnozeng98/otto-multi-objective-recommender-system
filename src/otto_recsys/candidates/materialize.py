@@ -17,7 +17,7 @@ from otto_recsys.candidates.targeted import TARGET_MATRIX_SOURCES, target_candid
 from otto_recsys.constants import EVENT_TYPES, EventType
 from otto_recsys.covisitation import MatrixStore
 from otto_recsys.covisitation.partitioned import iter_parquet_sessions
-from otto_recsys.features import build_candidate_features
+from otto_recsys.features import CandidateFeatureContext, build_candidate_features
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,14 +193,31 @@ def materialize_candidates(
     *,
     budget: int,
     popularity_budget: int,
+    history_budget: int | None = None,
+    covisitation_budget: int | None = None,
+    max_events_per_session: int | None = None,
+    query_contexts: Path | None = None,
+    popularity_events: Path | None = None,
+    include_labels: bool = True,
     batch_rows: int = 250_000,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> CandidateMaterializationResult:
-    """Persist labeled target-aware candidates and context-only features."""
-    if budget < 1 or popularity_budget < 0 or batch_rows < 1:
+    """Persist target-aware candidates and context-only features."""
+    if (
+        budget < 1
+        or popularity_budget < 0
+        or history_budget is not None
+        and history_budget < 0
+        or covisitation_budget is not None
+        and covisitation_budget < 0
+        or max_events_per_session is not None
+        and max_events_per_session < 1
+        or batch_rows < 1
+    ):
         raise ValueError(
-            "budget and batch_rows must be positive; popularity_budget cannot be negative"
+            "budgets cannot be negative; budget, batch_rows, and max_events_per_session "
+            "must be positive"
         )
     if destination.exists() and not overwrite:
         raise FileExistsError(f"Destination already exists: {destination}")
@@ -208,12 +225,20 @@ def materialize_candidates(
     if overwrite and temporary.exists():
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True, exist_ok=True)
+    query_contexts = query_contexts or view / "query_contexts.parquet"
+    popularity_events = popularity_events or view / "matrix_events.parquet"
     config_hash = stable_hash(
         {
             "budget": budget,
             "popularity_budget": popularity_budget,
+            "history_budget": history_budget,
+            "covisitation_budget": covisitation_budget,
+            "max_events_per_session": max_events_per_session,
             "view": str(view.resolve()),
             "stores": str(stores.resolve()),
+            "query_contexts": str(query_contexts.resolve()),
+            "popularity_events": str(popularity_events.resolve()),
+            "include_labels": include_labels,
         }
     )
     checkpoint = _load_checkpoint(temporary, config_hash)
@@ -238,19 +263,28 @@ def materialize_candidates(
     try:
         source_names = sorted({name for names in TARGET_MATRIX_SOURCES.values() for name in names})
         matrices = {name: MatrixStore(stores / name) for name in source_names}
-        popularity = _popular_aids(view / "matrix_events.parquet", popularity_budget)
-        labels = _load_labels(view / "labels.parquet")
+        popularity = _popular_aids(popularity_events, popularity_budget)
+        (temporary / "popularity.json").write_text(
+            json.dumps(
+                {target.value: list(popularity[target]) for target in EVENT_TYPES},
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        labels = _load_labels(view / "labels.parquet") if include_labels else {}
         sessions = checkpoint.sessions if checkpoint is not None else 0
         last_session = checkpoint.last_session if checkpoint is not None else -1
         chunk_sessions = 0
         for session in iter_parquet_sessions(
-            view / "query_contexts.parquet",
+            query_contexts,
             batch_rows=batch_rows,
         ):
             if session.session <= last_session:
                 continue
             sessions += 1
             chunk_sessions += 1
+            feature_context = CandidateFeatureContext.from_session(session)
             for target in EVENT_TYPES:
                 candidates = target_candidates(
                     session,
@@ -258,6 +292,9 @@ def materialize_candidates(
                     matrices,
                     popularity[target],
                     budget=budget,
+                    history_budget=history_budget,
+                    covisitation_budget=covisitation_budget,
+                    max_events_per_session=max_events_per_session,
                 )
                 true_aids = labels.get((session.session, target), set())
                 for candidate_rank, candidate in enumerate(candidates, start=1):
@@ -268,7 +305,7 @@ def materialize_candidates(
                         "aid": candidate.aid,
                         "label": label,
                         "candidate_rank": candidate_rank,
-                        **build_candidate_features(session, candidate),
+                        **build_candidate_features(session, candidate, context=feature_context),
                     }
                     buffers[target].append(row)
                     counts[target.value] += 1
@@ -324,7 +361,13 @@ def materialize_candidates(
         manifest = {
             "stage": "candidates",
             "config_hash": config_hash,
-            "inputs": {"view": str(view), "stores": str(stores)},
+            "inputs": {
+                "view": str(view),
+                "stores": str(stores),
+                "query_contexts": str(query_contexts),
+                "popularity_events": str(popularity_events),
+                "include_labels": include_labels,
+            },
             "result": asdict(result),
         }
         (temporary / "manifest.json").write_text(

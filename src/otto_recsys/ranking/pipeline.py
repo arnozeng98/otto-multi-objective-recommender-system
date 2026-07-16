@@ -15,7 +15,7 @@ from otto_recsys.constants import EVENT_TYPES, EventType
 from otto_recsys.metrics import weighted_recall_at_k
 from otto_recsys.ranking.xgboost_ranker import train_ranker
 
-IDENTIFIER_COLUMNS = frozenset(("session", "target", "aid", "label"))
+IDENTIFIER_COLUMNS = frozenset(("session", "target", "aid", "label", "query_group"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +24,11 @@ class RankerSuiteResult:
     validation_rows: dict[str, int]
     recall_at_20: dict[str, float]
     weighted_recall_at_20: float
+
+
+@dataclass(frozen=True, slots=True)
+class RefitSuiteResult:
+    training_rows: dict[str, int]
 
 
 def _read_target(
@@ -60,8 +65,8 @@ def _positive_groups(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.join(sessions, on="session", how="inner").sort("session")
 
 
-def _group_sizes(frame: pl.DataFrame) -> list[int]:
-    return frame.group_by("session", maintain_order=True).len()["len"].to_list()
+def _group_sizes(frame: pl.DataFrame, column: str = "session") -> list[int]:
+    return frame.group_by(column, maintain_order=True).len()["len"].to_list()
 
 
 def _ground_truth(path: Path) -> dict[tuple[int, EventType], list[int]]:
@@ -220,3 +225,109 @@ def train_ranker_suite(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def refit_ranker_suite(
+    candidate_sources: tuple[Path, ...],
+    destination: Path,
+    *,
+    device: str = "cpu",
+    rounds: int = 500,
+    max_depth: int = 8,
+    learning_rate: float = 0.08,
+    seed: int = 2026,
+    candidate_limit: int = 80,
+    query_limit: int = 50_000,
+    overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
+) -> RefitSuiteResult:
+    """Fit final target models from multiple temporal windows without test data."""
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {destination}")
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    if overwrite and temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir(parents=True, exist_ok=True)
+    training_rows: dict[str, int] = {}
+    per_source_limit = max(1, query_limit // len(candidate_sources))
+    for target in EVENT_TYPES:
+        model_path = temporary / f"{target.value}.json"
+        if model_path.exists() and model_path.with_suffix(".json.features.json").exists():
+            payload = json.loads(
+                (temporary / f"{target.value}.rows.json").read_text(encoding="utf-8")
+            )
+            training_rows[target.value] = int(payload["rows"])
+            if progress is not None:
+                progress(1)
+            continue
+        frames = [
+            _positive_groups(
+                _read_target(
+                    source,
+                    target,
+                    candidate_limit,
+                    keep_positives=True,
+                    query_limit=per_source_limit,
+                    require_positive_query=True,
+                )
+            ).with_columns(
+                pl.concat_str(pl.lit(source_index), pl.lit(":"), pl.col("session")).alias(
+                    "query_group"
+                )
+            )
+            for source_index, source in enumerate(candidate_sources)
+        ]
+        training = pl.concat(frames).sort("query_group")
+        if training.is_empty():
+            raise ValueError(f"Target {target.value} has no usable refit rows")
+        feature_names = tuple(
+            column for column in training.columns if column not in IDENTIFIER_COLUMNS
+        )
+        features = training.select(feature_names).to_numpy().astype(np.float32)
+        labels = training["label"].to_numpy().astype(np.float32)
+        model = train_ranker(
+            features,
+            labels,
+            _group_sizes(training, "query_group"),
+            feature_names,
+            device=device,
+            rounds=rounds,
+            seed=seed,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+        )
+        model.save(model_path)
+        training_rows[target.value] = len(training)
+        (temporary / f"{target.value}.rows.json").write_text(
+            json.dumps({"rows": len(training)}), encoding="utf-8"
+        )
+        if progress is not None:
+            progress(1)
+    result = RefitSuiteResult(training_rows=training_rows)
+    (temporary / "manifest.json").write_text(
+        json.dumps(
+            {
+                "stage": "ranker_refit",
+                "config_hash": stable_hash(
+                    {
+                        "candidate_sources": [str(path) for path in candidate_sources],
+                        "device": device,
+                        "rounds": rounds,
+                        "max_depth": max_depth,
+                        "learning_rate": learning_rate,
+                        "seed": seed,
+                        "candidate_limit": candidate_limit,
+                        "query_limit": query_limit,
+                    }
+                ),
+                "result": asdict(result),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.move(str(temporary), str(destination))
+    return result

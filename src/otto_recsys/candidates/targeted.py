@@ -26,18 +26,32 @@ def target_candidates(
     popular_aids: Sequence[int],
     *,
     budget: int,
+    history_budget: int | None = None,
+    covisitation_budget: int | None = None,
+    max_events_per_session: int | None = None,
 ) -> tuple[Candidate, ...]:
     """Generate target-aware candidates while preserving per-source evidence."""
     inputs: list[CandidateInput] = []
-    recency = list(dict.fromkeys(event.aid for event in reversed(session.events)))
-    frequency = Counter(event.aid for event in session.events)
+    events = (
+        session.events[-max_events_per_session:]
+        if max_events_per_session is not None
+        else session.events
+    )
+    recency = list(dict.fromkeys(event.aid for event in reversed(events)))
+    frequency = Counter(event.aid for event in events)
+    history = recency[:history_budget] if history_budget is not None else recency
+    for history_rank, aid in enumerate(history, start=1):
+        inputs.append(CandidateInput(aid, "history", float(frequency[aid]), history_rank))
+
+    covisitation_inputs = 0
     for seed_rank, aid in enumerate(recency, start=1):
-        inputs.append(CandidateInput(aid, "history", float(frequency[aid]), seed_rank))
         for source in TARGET_MATRIX_SOURCES[target]:
             matrix = matrices.get(source)
             if matrix is None:
                 continue
             for neighbor, score, neighbor_rank in matrix.neighbors(aid):
+                if covisitation_budget is not None and covisitation_inputs >= covisitation_budget:
+                    break
                 inputs.append(
                     CandidateInput(
                         neighbor,
@@ -46,6 +60,11 @@ def target_candidates(
                         neighbor_rank,
                     )
                 )
+                covisitation_inputs += 1
+            if covisitation_budget is not None and covisitation_inputs >= covisitation_budget:
+                break
+        if covisitation_budget is not None and covisitation_inputs >= covisitation_budget:
+            break
     for rank, aid in enumerate(popular_aids, start=1):
         inputs.append(CandidateInput(aid, "popularity", 0.01, rank))
     return merge_candidates(inputs, budget)

@@ -26,4 +26,7 @@ def test_run_command_exposes_non_interactive_progress_option() -> None:
 
     assert result.exit_code == 0, result.output
     assert "--no-progress" in result.output
-    assert "nine-stage" in result.output
+    assert "--train" in result.output
+    assert "--test" in result.output
+    assert "--sample-submission" in result.output
+    assert "--model-strategy" in result.output

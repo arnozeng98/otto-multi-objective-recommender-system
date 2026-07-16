@@ -92,6 +92,32 @@ def test_target_candidates_use_target_specific_matrices() -> None:
     assert "adjacent_clicks" not in order_sources
 
 
+def test_target_candidates_enforce_source_and_session_budgets() -> None:
+    session = Session(
+        1,
+        (
+            Event(10, 0, EventType.CLICKS),
+            Event(20, 1, EventType.CLICKS),
+            Event(30, 2, EventType.CLICKS),
+        ),
+    )
+    matrices = {"adjacent_clicks": _Lookup(40), "time_decay": _Lookup(50)}
+
+    candidates = target_candidates(
+        session,
+        EventType.CLICKS,
+        matrices,
+        (),
+        budget=10,
+        history_budget=1,
+        covisitation_budget=1,
+        max_events_per_session=2,
+    )
+
+    assert {candidate.aid for candidate in candidates} == {30, 40}
+    assert all(candidate.aid != 10 for candidate in candidates)
+
+
 def test_materialize_candidates_writes_labeled_target_partitions(tmp_path: Path) -> None:
     source = tmp_path / "sessions.jsonl"
     source.write_text(
@@ -155,6 +181,58 @@ def test_materialize_candidates_writes_labeled_target_partitions(tmp_path: Path)
     assert result.positives["carts"] == 1
     assert result.positives["orders"] == 1
     assert result.positives["clicks"] == 0
+
+
+def test_materialize_candidates_supports_unlabeled_inference(tmp_path: Path) -> None:
+    source = tmp_path / "sessions.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "session": 1,
+                "events": [
+                    {"aid": 10, "ts": 100, "type": "clicks"},
+                    {"aid": 20, "ts": 200, "type": "orders"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parquet = tmp_path / "events.parquet"
+    view = tmp_path / "view"
+    matrices = tmp_path / "matrices"
+    stores = tmp_path / "stores"
+    candidates = tmp_path / "candidates"
+    convert_jsonl_to_parquet(source, parquet, batch_events=1)
+    materialize_temporal_split(parquet, view, 150)
+    build_covisitation_suite(
+        view / "matrix_events.parquet",
+        matrices,
+        max_neighbors=2,
+        partitions=2,
+        pair_buffer_size=1,
+        batch_rows=1,
+    )
+    build_matrix_store_suite(matrices, stores)
+
+    result = materialize_candidates(
+        view,
+        stores,
+        candidates,
+        budget=3,
+        popularity_budget=2,
+        query_contexts=parquet,
+        popularity_events=view / "matrix_events.parquet",
+        include_labels=False,
+        batch_rows=2,
+    )
+
+    assert result.sessions == 1
+    assert result.positives == {target.value: 0 for target in EventType}
+    for target in EventType:
+        frame = pl.read_parquet(candidates / target.value / "*.parquet")
+        assert frame["session"].unique().to_list() == [1]
+        assert frame["label"].sum() == 0
 
 
 def test_candidate_materialization_resumes_synchronized_checkpoint(tmp_path: Path) -> None:

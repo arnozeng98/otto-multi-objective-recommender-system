@@ -100,6 +100,7 @@ def build_partitioned_covisitation(
     partitions: int = 64,
     pair_buffer_size: int = 500_000,
     batch_rows: int = 250_000,
+    max_events_per_session: int | None = None,
     overwrite: bool = False,
 ) -> PartitionedBuildResult:
     """Build a disk-partitioned top-K co-visitation matrix from flat event Parquet."""
@@ -123,6 +124,8 @@ def build_partitioned_covisitation(
     try:
         for session in iter_parquet_sessions(source, batch_rows=batch_rows):
             sessions += 1
+            if max_events_per_session is not None:
+                session = Session(session.session, session.events[-max_events_per_session:])
             for source_aid, target_aid, weight in iter_weighted_pairs(session, rule):
                 buffers[source_aid % partitions].append((source_aid, target_aid, weight))
                 buffered_pairs += 1
@@ -151,7 +154,13 @@ def build_partitioned_covisitation(
         )
         manifest = {
             "stage": "partitioned_covisitation",
-            "config_hash": stable_hash({"rule": asdict(rule), "partitions": partitions}),
+            "config_hash": stable_hash(
+                {
+                    "rule": asdict(rule),
+                    "partitions": partitions,
+                    "max_events_per_session": max_events_per_session,
+                }
+            ),
             "input": {
                 "path": str(source),
                 "size": source_stat.st_size,
@@ -181,6 +190,7 @@ def build_covisitation_suite(
     partitions: int = 64,
     pair_buffer_size: int = 500_000,
     batch_rows: int = 250_000,
+    max_events_per_session: int | None = None,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> CovisitationSuiteResult:
@@ -209,6 +219,7 @@ def build_covisitation_suite(
                     partitions=partitions,
                     pair_buffer_size=pair_buffer_size,
                     batch_rows=batch_rows,
+                    max_events_per_session=max_events_per_session,
                 )
             if progress is not None:
                 progress(1)
@@ -221,6 +232,8 @@ def build_covisitation_suite(
                     "max_neighbors": max_neighbors,
                     "partitions": partitions,
                     "pair_buffer_size": pair_buffer_size,
+                    "batch_rows": batch_rows,
+                    "max_events_per_session": max_events_per_session,
                 }
             ),
             "input": {

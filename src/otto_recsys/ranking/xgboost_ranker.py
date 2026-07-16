@@ -14,9 +14,16 @@ class RankerModel:
     booster: Any
     feature_names: tuple[str, ...]
 
-    def predict(self, features: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, Any]:
+    def predict(
+        self,
+        features: np.ndarray[Any, np.dtype[np.float32]],
+        *,
+        device: str | None = None,
+    ) -> np.ndarray[Any, Any]:
         import xgboost as xgb
 
+        if device is not None:
+            self.booster.set_param({"device": device})
         matrix = xgb.DMatrix(features, feature_names=list(self.feature_names))
         return np.asarray(self.booster.predict(matrix))
 
