@@ -37,3 +37,31 @@ def split_session(
         labels[event_type] = tuple(dict.fromkeys(aids))
     context = Session(session.session, context_events) if context_events else None
     return TemporalSplit(context=context, labels=labels)
+
+
+def split_official_session(session: Session, context_length: int) -> TemporalSplit:
+    """Split a session with the organizer's random-event test-set semantics."""
+    ordered = tuple(sorted(session.events, key=lambda event: event.ts))
+    maximum = len(ordered) - 1
+    if not 1 <= context_length <= maximum:
+        raise ValueError(f"context_length must be between 1 and {maximum}")
+
+    context_events = ordered[:context_length]
+    future_events = ordered[context_length:]
+    next_click = next(
+        (event.aid for event in future_events if event.type == EventType.CLICKS),
+        None,
+    )
+    labels: dict[EventType, tuple[int, ...]] = {
+        EventType.CLICKS: (next_click,) if next_click is not None else (),
+        EventType.CARTS: tuple(
+            dict.fromkeys(event.aid for event in future_events if event.type == EventType.CARTS)
+        ),
+        EventType.ORDERS: tuple(
+            dict.fromkeys(event.aid for event in future_events if event.type == EventType.ORDERS)
+        ),
+    }
+    return TemporalSplit(
+        context=Session(session.session, context_events),
+        labels=labels,
+    )

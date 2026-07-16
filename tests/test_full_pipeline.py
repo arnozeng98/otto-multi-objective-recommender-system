@@ -55,6 +55,7 @@ def test_run_command_writes_and_reuses_submission(tmp_path: Path) -> None:
     )
     config = yaml.safe_load(Path("configs/base.yaml").read_text(encoding="utf-8"))
     config["project"]["artifacts_dir"] = str(validation_root)
+    config["validation"]["strategy"] = "legacy_global_cutoff"
     config["validation"]["training_cutoff_timestamp_ms"] = 150
     config["validation"]["cutoff_timestamp_ms"] = 350
     config["covisitation"]["partitions"] = 2

@@ -39,6 +39,8 @@ def _read_target(
     keep_positives: bool,
     query_limit: int | None,
     require_positive_query: bool,
+    seed: int = 2026,
+    negative_sample_rate: float | None = None,
 ) -> pl.DataFrame:
     frame = pl.scan_parquet(path / target.value / "*.parquet")
     if "candidate_rank" in frame.collect_schema().names():
@@ -50,8 +52,19 @@ def _read_target(
         queries = frame.group_by("session").agg(pl.col("label").sum().alias("positives"))
         if require_positive_query:
             queries = queries.filter(pl.col("positives") > 0)
-        selected = queries.select("session").sort("session").head(query_limit).collect()
+        selected = (
+            queries.select("session")
+            .with_columns(pl.col("session").hash(seed=seed).alias("sample_key"))
+            .sort("sample_key", "session")
+            .head(query_limit)
+            .select("session")
+            .collect()
+        )
         frame = frame.join(selected.lazy(), on="session", how="semi")
+    if negative_sample_rate is not None and negative_sample_rate < 1.0:
+        threshold = int(negative_sample_rate * 10_000)
+        sample_key = pl.struct("session", "aid").hash(seed=seed) % 10_000
+        frame = frame.filter((pl.col("label") > 0) | (sample_key < threshold))
     return frame.sort("session").collect(engine="streaming")
 
 
@@ -99,6 +112,7 @@ def train_ranker_suite(
     validation_candidate_limit: int = 120,
     training_query_limit: int | None = 50_000,
     validation_query_limit: int | None = 50_000,
+    negative_sample_rates: dict[EventType, float] | None = None,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> RankerSuiteResult:
@@ -112,6 +126,7 @@ def train_ranker_suite(
     training_rows: dict[str, int] = {}
     validation_rows: dict[str, int] = {}
     predictions: dict[tuple[int, EventType], list[int]] = {}
+    negative_sample_rates = negative_sample_rates or {target: 1.0 for target in EVENT_TYPES}
     try:
         for target in EVENT_TYPES:
             training = _positive_groups(
@@ -122,6 +137,8 @@ def train_ranker_suite(
                     keep_positives=True,
                     query_limit=training_query_limit,
                     require_positive_query=True,
+                    seed=seed,
+                    negative_sample_rate=negative_sample_rates[target],
                 )
             )
             validation = _read_target(
@@ -131,6 +148,7 @@ def train_ranker_suite(
                 keep_positives=False,
                 query_limit=validation_query_limit,
                 require_positive_query=False,
+                seed=seed,
             )
             if training.is_empty() or validation.is_empty():
                 raise ValueError(f"Target {target.value} has no usable ranking rows")
@@ -205,6 +223,9 @@ def train_ranker_suite(
                     "validation_candidate_limit": validation_candidate_limit,
                     "training_query_limit": training_query_limit,
                     "validation_query_limit": validation_query_limit,
+                    "negative_sample_rates": {
+                        target.value: negative_sample_rates[target] for target in EVENT_TYPES
+                    },
                 }
             ),
             "inputs": {

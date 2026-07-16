@@ -19,6 +19,9 @@ class CovisitationRule:
     half_life_seconds: float | None = 3_600.0
     forward_only: bool = False
     max_neighbors: int = 80
+    deduplicate_pairs: bool = False
+    target_type_weights: tuple[tuple[EventType, float], ...] = ()
+    timestamp_weight_range: tuple[float, float, float, float] | None = None
 
 
 def iter_weighted_pairs(
@@ -26,6 +29,8 @@ def iter_weighted_pairs(
 ) -> Iterable[tuple[int, int, float]]:
     """Yield weighted item pairs for one session and rule."""
     events = sorted(session.events, key=lambda event: event.ts)
+    seen_pairs: set[tuple[int, int]] = set()
+    target_type_weights = dict(rule.target_type_weights)
     for source_index, source in enumerate(events):
         if source.type not in rule.source_types:
             continue
@@ -41,12 +46,22 @@ def iter_weighted_pairs(
             target = events[target_index]
             if target.type not in rule.target_types or target.aid == source.aid:
                 continue
+            pair = (source.aid, target.aid)
+            if rule.deduplicate_pairs and pair in seen_pairs:
+                continue
             time_delta_seconds = abs(target.ts - source.ts) / 1_000.0
             if time_delta_seconds > rule.max_time_seconds:
                 continue
             weight = 1.0
             if rule.half_life_seconds is not None:
                 weight = math.pow(0.5, time_delta_seconds / rule.half_life_seconds)
+            if rule.timestamp_weight_range is not None:
+                start, end, minimum, maximum = rule.timestamp_weight_range
+                source_seconds = source.ts / 1_000.0
+                progress = min(1.0, max(0.0, (source_seconds - start) / (end - start)))
+                weight *= minimum + (maximum - minimum) * progress
+            weight *= target_type_weights.get(target.type, 1.0)
+            seen_pairs.add(pair)
             yield source.aid, target.aid, weight
 
 

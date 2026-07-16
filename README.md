@@ -11,8 +11,8 @@ The project is designed for **WSL2/Linux, one NVIDIA RTX 5070 with 12 GB VRAM, 3
 The practical default pipeline is:
 
 1. Stream session JSONL into compact Parquet.
-2. Create a leakage-safe global temporal validation split.
-3. Generate candidates from session history, target popularity, and five configurable co-visitation families.
+2. Create organizer-compatible random-event validation windows with known-item filtering.
+3. Generate candidates with the public `0.575` three-matrix co-visitation baseline.
 4. Optionally add SASRec, Mamba, HSTU-style, or semantic-ID candidates.
 5. Deduplicate and retain candidate-source evidence.
 6. Build context-only session, item, and session-item features.
@@ -142,8 +142,8 @@ uv run otto-recsys build-covisitation \
 	--partitions 64
 ```
 
-Available rules are `adjacent_clicks`, `time_decay`, `all_to_buy`, `buy_to_buy`, and
-`recent_trend`. The builder streams sessions across Parquet batch boundaries, writes pair
+The production `public_v575` profile builds `clicks_all_to_all`, `carts_orders`, and
+`buy_to_buy`; `legacy_five` retains the earlier experimental rules. The builder streams sessions across Parquet batch boundaries, writes pair
 fragments by source-item hash, reduces one partition at a time, and retains the configured
 top-K neighbors per source item. Completed output is promoted atomically:
 
@@ -156,7 +156,7 @@ artifacts/covisitation/time_decay/
 ```
 
 Use `--pair-buffer-size` to trade memory for fragment count. Existing destinations are
-protected unless `--overwrite` is supplied. Production runs build all five rules and convert
+protected unless `--overwrite` is supplied. Production runs build the selected profile and convert
 each partition to lazy memory-mapped lookup arrays:
 
 ```bash
@@ -195,7 +195,7 @@ Run the complete classical pipeline from train/test JSONL through a validated Ka
 
 ```bash
 uv run otto-recsys run \
-	artifacts/single_gpu/full-run \
+	artifacts/single_gpu/v2-full-run \
 	--config configs/single_gpu.yaml
 ```
 
@@ -205,13 +205,18 @@ The command defaults to `data/train.jsonl`, `data/test.jsonl`, and
 retrieval assets, generates and scores all test candidates, and atomically writes:
 
 ```text
-artifacts/single_gpu/full-run/submission/submission.csv
+artifacts/single_gpu/v2-full-run/submission/submission.csv
 ```
 
 Repeating an identical completed command reuses every artifact. A different source or
 configuration is rejected unless `--overwrite` is explicit. Use `--no-progress` for stable CI
 or redirected JSON output. Use `otto-recsys run-validation SOURCE DESTINATION` when only local
 temporal evaluation is required.
+
+Official validation writes full candidate Recall@20/50/80/100/150, source union and marginal
+recall, positive-rank histograms, and session-length buckets. Production stops before ranker
+training when rules Recall@20 is below `0.54` or candidate Recall@100 is below `0.62`.
+`--allow-low-score` exists only for diagnostics and must not be used for a submission run.
 
 Interrupted runs resume automatically. Completed stage manifests are reused, matrix/store suites
 reuse completed child rules, and candidate materialization checkpoints synchronized three-target
@@ -226,7 +231,7 @@ workspace:
 MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu \
 	--cd /mnt/c/Users/arnoz/Desktop/repos/otto-multi-objective-recommender-system \
 	-- /home/arnozeng/.venvs/otto/bin/python -m otto_recsys.cli run \
-	artifacts/single_gpu/full-run \
+	artifacts/single_gpu/v2-full-run \
 	--config configs/single_gpu.yaml
 ```
 
@@ -267,8 +272,11 @@ Modern models are candidate sources, not replacements for the full system. A sou
 - Candidate fusion is capped at roughly 200–350 unique items per session and target.
 - Ranker input keeps all positives plus the first 80 training candidates and first 120
 	validation candidates per query by default.
-- Ranker training and evaluation use deterministic 50,000-query samples per target by default
+- Ranker training and evaluation use seed-controlled 50,000-query samples per target by default
 	so dense XGBoost matrices remain within the verified 16 GB WSL memory allocation.
+- Training preserves every positive and samples target-specific negatives at 5%/25%/40% for
+	clicks/carts/orders. Inference co-visitation and popularity use the allowed unlabeled
+	`train + test context` corpus; supervised labels never enter these artifacts.
 - Research profiles run separately so a baseline iteration remains within several hours.
 
 The in-memory reference builder remains useful for tests and bounded slices. Full-data runs use

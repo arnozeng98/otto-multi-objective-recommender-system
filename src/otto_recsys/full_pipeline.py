@@ -11,6 +11,7 @@ from otto_recsys.candidates.materialize import materialize_candidates
 from otto_recsys.config import AppConfig
 from otto_recsys.constants import EVENT_TYPES
 from otto_recsys.covisitation import build_covisitation_suite, build_matrix_store_suite
+from otto_recsys.data.materialize import concatenate_event_parquets
 from otto_recsys.data.preprocess import convert_jsonl_to_parquet
 from otto_recsys.pipeline import run_validation_pipeline
 from otto_recsys.progress import create_progress
@@ -58,6 +59,9 @@ def _compatible_validation_run(path: Path, train: Path, config: AppConfig) -> bo
     current_source = _source_spec(train)
     if source.get("size") != current_source["size"]:
         return False
+    validation_config = payload.get("config", {}).get("validation", {})
+    if validation_config.get("strategy") != config.validation.strategy:
+        return False
     return _is_subset(payload.get("config", {}), config.model_dump(mode="json"))
 
 
@@ -91,6 +95,7 @@ def run_full_pipeline(
     validation_run: Path | None = None,
     overwrite: bool = False,
     show_progress: bool = True,
+    allow_low_score: bool = False,
 ) -> FullPipelineResult:
     """Run or resume training, test inference, and validated Kaggle submission output."""
     validation_run = validation_run or config.project.artifacts_dir / "full-validation"
@@ -101,6 +106,7 @@ def run_full_pipeline(
         "config": config.model_dump(mode="json"),
         "validation_run": str(validation_run.resolve()),
         "model_strategy": config.ranking.model_strategy,
+        "allow_low_score": allow_low_score,
     }
     spec_hash = _write_spec(destination, spec, overwrite)
     final_manifest = destination / "manifest.json"
@@ -138,7 +144,13 @@ def run_full_pipeline(
             stages["validation"] = "reused"
             progress.finish("reused")
         else:
-            run_validation_pipeline(train, validation_run, config, show_progress=False)
+            run_validation_pipeline(
+                train,
+                validation_run,
+                config,
+                show_progress=False,
+                allow_low_score=allow_low_score,
+            )
             stages["validation"] = "completed"
             progress.finish("completed")
 
@@ -156,27 +168,48 @@ def run_full_pipeline(
         test_payload = json.loads(test_report.read_text(encoding="utf-8"))
 
         train_events = validation_run / "events.parquet"
+        inference_events = destination / "full-history-events.parquet"
+        inference_events_report = destination / "full-history-events.json"
+        if not inference_events.exists() or not inference_events_report.exists():
+            event_rows = concatenate_event_parquets((train_events, test_events), inference_events)
+            inference_events_report.write_text(
+                json.dumps(
+                    {
+                        "stage": "transductive_inference_events",
+                        "inputs": {
+                            "train": _source_spec(train_events),
+                            "test_context": _source_spec(test_events),
+                        },
+                        "result": {"events": event_rows},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
         matrices = destination / "full-history-matrices"
-        progress.start_stage(3, 8, stage_names[2], total=5, unit="rules")
+        matrix_count = 3 if config.covisitation.profile == "public_v575" else 5
+        progress.start_stage(3, 8, stage_names[2], total=matrix_count, unit="rules")
         if _complete(matrices):
             stages["full_history_matrices"] = "reused"
             progress.finish("reused")
         else:
             build_covisitation_suite(
-                train_events,
+                inference_events,
                 matrices,
                 max_neighbors=config.covisitation.max_neighbors,
                 partitions=config.covisitation.partitions,
                 pair_buffer_size=config.covisitation.pair_buffer_size,
                 batch_rows=config.covisitation.batch_rows,
                 max_events_per_session=config.covisitation.max_events_per_session,
+                profile=config.covisitation.profile,
                 progress=progress.advance,
             )
             stages["full_history_matrices"] = "completed"
             progress.finish("completed")
 
         stores = destination / "full-history-stores"
-        progress.start_stage(4, 8, stage_names[3], total=5, unit="stores")
+        progress.start_stage(4, 8, stage_names[3], total=matrix_count, unit="stores")
         if _complete(stores):
             stages["full_history_stores"] = "reused"
             progress.finish("reused")
@@ -193,7 +226,7 @@ def run_full_pipeline(
                     "stage": "inference_view",
                     "inputs": {
                         "query_contexts": str(test_events),
-                        "popularity_events": str(train_events),
+                        "popularity_events": str(inference_events),
                     },
                     "result": {"query_sessions": int(test_payload["sessions"])},
                 },
@@ -220,7 +253,7 @@ def run_full_pipeline(
                 covisitation_budget=config.candidates.covisitation_budget,
                 max_events_per_session=config.covisitation.max_events_per_session,
                 query_contexts=test_events,
-                popularity_events=train_events,
+                popularity_events=inference_events,
                 include_labels=False,
                 progress=progress.advance,
             )

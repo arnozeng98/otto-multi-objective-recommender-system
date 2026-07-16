@@ -8,9 +8,14 @@ from pathlib import Path
 from otto_recsys.artifacts import stable_hash
 from otto_recsys.candidates.materialize import materialize_candidates
 from otto_recsys.config import AppConfig
+from otto_recsys.constants import EventType
 from otto_recsys.covisitation import build_covisitation_suite, build_matrix_store_suite
-from otto_recsys.data.materialize import materialize_validation_views
+from otto_recsys.data.materialize import (
+    materialize_official_validation_views,
+    materialize_validation_views,
+)
 from otto_recsys.data.preprocess import convert_jsonl_to_parquet
+from otto_recsys.metrics import CandidateRecallReport, evaluate_candidate_recall
 from otto_recsys.progress import create_progress
 from otto_recsys.ranking import RankerSuiteResult, train_ranker_suite
 
@@ -26,6 +31,26 @@ def _complete(path: Path) -> bool:
     return (path / "manifest.json").exists()
 
 
+def _check_candidate_quality(report: CandidateRecallReport, config: AppConfig) -> None:
+    failures = []
+    if report.weighted_recall_at_20 < config.validation.minimum_rules_recall_at_20:
+        failures.append(
+            f"rules Recall@20 {report.weighted_recall_at_20:.6f} < "
+            f"{config.validation.minimum_rules_recall_at_20:.6f}"
+        )
+    if report.weighted_recall_at_100 < config.validation.minimum_candidate_recall_at_100:
+        failures.append(
+            f"candidate Recall@100 {report.weighted_recall_at_100:.6f} < "
+            f"{config.validation.minimum_candidate_recall_at_100:.6f}"
+        )
+    if failures:
+        raise RuntimeError(
+            "Candidate quality gate failed: "
+            + "; ".join(failures)
+            + ". Inspect candidate-recall.json before training or submission."
+        )
+
+
 def run_validation_pipeline(
     source: Path,
     destination: Path,
@@ -34,6 +59,7 @@ def run_validation_pipeline(
     max_sessions: int | None = None,
     overwrite: bool = False,
     show_progress: bool = False,
+    allow_low_score: bool = False,
 ) -> ValidationPipelineResult:
     """Run or resume the complete classical local-validation pipeline."""
     source_stat = source.stat()
@@ -126,13 +152,22 @@ def run_validation_pipeline(
             progress.finish("reused")
         else:
             shutil.rmtree(views, ignore_errors=True)
-            materialize_validation_views(
-                events,
-                views,
-                config.validation.training_cutoff_timestamp_ms,
-                config.validation.cutoff_timestamp_ms,
-                progress=progress.advance,
-            )
+            if config.validation.strategy == "official_random_event":
+                materialize_official_validation_views(
+                    events,
+                    views,
+                    validation_days=config.validation.days,
+                    seed=config.validation.seed,
+                    progress=progress.advance,
+                )
+            else:
+                materialize_validation_views(
+                    events,
+                    views,
+                    config.validation.training_cutoff_timestamp_ms,
+                    config.validation.cutoff_timestamp_ms,
+                    progress=progress.advance,
+                )
             stages["views"] = "completed"
             progress.finish("completed")
         views_payload = json.loads((views / "manifest.json").read_text(encoding="utf-8"))
@@ -141,8 +176,13 @@ def run_validation_pipeline(
             step_base = 3 + view_index * 3
             matrices = destination / "matrices" / view_name
             matrix_stage = f"matrices_{view_name}"
+            matrix_count = 3 if config.covisitation.profile == "public_v575" else 5
             progress.start_stage(
-                step_base, total_steps, stage_names[step_base - 1], total=5, unit="rules"
+                step_base,
+                total_steps,
+                stage_names[step_base - 1],
+                total=matrix_count,
+                unit="rules",
             )
             if _complete(matrices):
                 stages[matrix_stage] = "reused"
@@ -156,6 +196,7 @@ def run_validation_pipeline(
                     pair_buffer_size=config.covisitation.pair_buffer_size,
                     batch_rows=config.covisitation.batch_rows,
                     max_events_per_session=config.covisitation.max_events_per_session,
+                    profile=config.covisitation.profile,
                     progress=progress.advance,
                 )
                 stages[matrix_stage] = "completed"
@@ -167,7 +208,7 @@ def run_validation_pipeline(
                 step_base + 1,
                 total_steps,
                 stage_names[step_base],
-                total=5,
+                total=matrix_count,
                 unit="stores",
             )
             if _complete(stores):
@@ -206,6 +247,22 @@ def run_validation_pipeline(
                 stages[candidate_stage] = "completed"
                 progress.finish("completed")
 
+        recall_path = destination / "candidate-recall.json"
+        candidate_recall = evaluate_candidate_recall(
+            destination / "candidates" / "local_validation",
+            views / "local_validation" / "labels.parquet",
+        )
+        recall_path.write_text(
+            json.dumps(asdict(candidate_recall), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        if (
+            config.validation.strategy == "official_random_event"
+            and config.validation.enforce_quality_gate
+            and not allow_low_score
+        ):
+            _check_candidate_quality(candidate_recall, config)
+
         ranker_path = destination / "rankers"
         progress.start_stage(9, total_steps, stage_names[8], total=3, unit="targets")
         if _complete(ranker_path):
@@ -228,6 +285,11 @@ def run_validation_pipeline(
                 validation_candidate_limit=config.ranking.validation_candidate_limit,
                 training_query_limit=config.ranking.training_query_limit,
                 validation_query_limit=config.ranking.validation_query_limit,
+                negative_sample_rates={
+                    EventType.CLICKS: config.ranking.clicks_negative_sample_rate,
+                    EventType.CARTS: config.ranking.carts_negative_sample_rate,
+                    EventType.ORDERS: config.ranking.orders_negative_sample_rate,
+                },
                 progress=progress.advance,
             )
             stages["rankers"] = "completed"

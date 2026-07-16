@@ -261,7 +261,11 @@ def materialize_candidates(
         (temporary / target.value).mkdir(exist_ok=True)
 
     try:
-        source_names = sorted({name for names in TARGET_MATRIX_SOURCES.values() for name in names})
+        source_names = sorted(
+            name
+            for name in {name for names in TARGET_MATRIX_SOURCES.values() for name in names}
+            if (stores / name / "manifest.json").exists()
+        )
         matrices = {name: MatrixStore(stores / name) for name in source_names}
         popularity = _popular_aids(popularity_events, popularity_budget)
         (temporary / "popularity.json").write_text(

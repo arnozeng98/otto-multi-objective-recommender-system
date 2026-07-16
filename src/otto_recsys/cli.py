@@ -19,6 +19,7 @@ from otto_recsys.covisitation import (
     default_rules,
 )
 from otto_recsys.data.materialize import (
+    materialize_official_validation_views,
     materialize_temporal_split,
     materialize_validation_views,
 )
@@ -121,14 +122,24 @@ def prepare_validation_command(
 ) -> None:
     """Materialize ranker-training and local-validation temporal views."""
     config = load_config(config_path)
-    result = materialize_validation_views(
-        source,
-        destination,
-        config.validation.training_cutoff_timestamp_ms,
-        config.validation.cutoff_timestamp_ms,
-        batch_rows=batch_rows,
-        overwrite=overwrite,
-    )
+    if config.validation.strategy == "official_random_event":
+        result = materialize_official_validation_views(
+            source,
+            destination,
+            validation_days=config.validation.days,
+            seed=config.validation.seed,
+            batch_rows=batch_rows,
+            overwrite=overwrite,
+        )
+    else:
+        result = materialize_validation_views(
+            source,
+            destination,
+            config.validation.training_cutoff_timestamp_ms,
+            config.validation.cutoff_timestamp_ms,
+            batch_rows=batch_rows,
+            overwrite=overwrite,
+        )
     typer.echo(json.dumps(asdict(result), indent=2))
 
 
@@ -255,6 +266,7 @@ def run_validation_command(
     max_sessions: int | None = typer.Option(None, min=1),
     overwrite: bool = typer.Option(False, "--overwrite"),
     no_progress: bool = typer.Option(False, "--no-progress"),
+    allow_low_score: bool = typer.Option(False, "--allow-low-score"),
 ) -> None:
     """Run or resume the complete classical local-validation pipeline."""
     result = run_validation_pipeline(
@@ -264,6 +276,7 @@ def run_validation_command(
         max_sessions=max_sessions,
         overwrite=overwrite,
         show_progress=not no_progress,
+        allow_low_score=allow_low_score,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
 
@@ -281,6 +294,7 @@ def run_command(
     model_strategy: Annotated[str | None, typer.Option("--model-strategy")] = None,
     overwrite: bool = typer.Option(False, "--overwrite"),
     no_progress: bool = typer.Option(False, "--no-progress"),
+    allow_low_score: bool = typer.Option(False, "--allow-low-score"),
 ) -> None:
     """Run or resume training, test inference, and Kaggle submission output."""
     config = load_config(config_path)
@@ -299,6 +313,7 @@ def run_command(
         validation_run=validation_run,
         overwrite=overwrite,
         show_progress=not no_progress,
+        allow_low_score=allow_low_score,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
 

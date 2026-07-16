@@ -191,11 +191,21 @@ def build_covisitation_suite(
     pair_buffer_size: int = 500_000,
     batch_rows: int = 250_000,
     max_events_per_session: int | None = None,
+    profile: str = "legacy_five",
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> CovisitationSuiteResult:
     """Build and atomically publish all default co-visitation matrices."""
-    from otto_recsys.covisitation.rules import default_rules
+    from otto_recsys.covisitation.rules import default_rules, public_v575_rules
+
+    rule_profiles = {
+        "legacy_five": default_rules,
+        "public_v575": public_v575_rules,
+    }
+    if profile not in rule_profiles:
+        available = ", ".join(sorted(rule_profiles))
+        raise ValueError(f"Unknown co-visitation profile '{profile}'; expected one of {available}")
+    rules = rule_profiles[profile](max_neighbors)
 
     if destination.exists() and not overwrite:
         raise FileExistsError(f"Destination already exists: {destination}")
@@ -205,7 +215,7 @@ def build_covisitation_suite(
     temporary.mkdir(parents=True, exist_ok=True)
     try:
         matrices: dict[str, PartitionedBuildResult] = {}
-        for name, rule in default_rules(max_neighbors).items():
+        for name, rule in rules.items():
             child = temporary / name
             if (child / "manifest.json").exists():
                 payload = json.loads((child / "manifest.json").read_text(encoding="utf-8"))
@@ -234,6 +244,7 @@ def build_covisitation_suite(
                     "pair_buffer_size": pair_buffer_size,
                     "batch_rows": batch_rows,
                     "max_events_per_session": max_events_per_session,
+                    "profile": profile,
                 }
             ),
             "input": {

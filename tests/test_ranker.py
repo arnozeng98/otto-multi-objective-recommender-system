@@ -7,6 +7,57 @@ import pytest
 xgboost = pytest.importorskip("xgboost")
 
 
+def test_target_reader_uses_seeded_queries_and_preserves_positives(tmp_path: Path) -> None:
+    from otto_recsys.constants import EventType
+    from otto_recsys.ranking.pipeline import _read_target
+
+    directory = tmp_path / EventType.CLICKS.value
+    directory.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "session": [session for session in range(1, 11) for _ in range(2)],
+            "aid": [aid for session in range(1, 11) for aid in (session, session + 100)],
+            "label": [label for _ in range(1, 11) for label in (1, 0)],
+            "candidate_rank": [rank for _ in range(1, 11) for rank in (1, 2)],
+        }
+    ).write_parquet(directory / "part.parquet")
+
+    first = _read_target(
+        tmp_path,
+        EventType.CLICKS,
+        2,
+        keep_positives=True,
+        query_limit=3,
+        require_positive_query=True,
+        seed=7,
+        negative_sample_rate=0.01,
+    )
+    repeated = _read_target(
+        tmp_path,
+        EventType.CLICKS,
+        2,
+        keep_positives=True,
+        query_limit=3,
+        require_positive_query=True,
+        seed=7,
+        negative_sample_rate=0.01,
+    )
+    changed = _read_target(
+        tmp_path,
+        EventType.CLICKS,
+        2,
+        keep_positives=True,
+        query_limit=3,
+        require_positive_query=True,
+        seed=8,
+        negative_sample_rate=0.01,
+    )
+
+    assert first.equals(repeated)
+    assert first["session"].unique().to_list() != changed["session"].unique().to_list()
+    assert first.group_by("session").agg(pl.col("label").sum())["label"].min() == 1
+
+
 def test_ranker_trains_and_predicts_grouped_candidates(tmp_path) -> None:
     from otto_recsys.ranking import RankerModel, train_ranker
 

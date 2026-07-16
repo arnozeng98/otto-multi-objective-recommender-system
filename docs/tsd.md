@@ -108,8 +108,10 @@ The CSV header is `session_type,labels`. Each test session has exactly three row
 
 ## 8. Temporal Validation and Leakage Rules
 
-- An earlier cutoff creates ranker-training queries; its label window ends at the final
-	validation cutoff.
+- The default split follows the organizer's new-session cohort, known-aid filtering, seeded
+	random context event, next-click label, and future cart/order set semantics.
+- An earlier official seven-day window creates ranker-training queries; the following window
+	is the complete candidate-quality evaluation cohort.
 - The final cutoff creates local-validation queries and labels.
 - Popularity, matrices, embeddings, and features use context/training events only.
 - Validation labels never enter pair counts, hard-negative pools, or item popularity.
@@ -119,13 +121,11 @@ The CSV header is `session_type,labels`. Each test session has exactly three row
 
 ## 9. Candidate Generation
 
-The default single-GPU profile uses five configurable matrix families:
+The default single-GPU profile reproduces the public three-matrix rules baseline:
 
-1. Adjacent forward click transitions.
-2. All-event pairs with exponential time decay.
-3. Forward click/cart/order to cart/order pairs.
-4. Cart/order to cart/order pairs.
-5. Recent-window trend pairs.
+1. All-to-all 24-hour pairs with the public absolute timestamp weight.
+2. All-event to cart/order pairs with target weights 6 and 3.
+3. Cart/order to cart/order pairs over 14 days.
 
 The generic rule supports source and target event filters, direction, sequence distance, time window, half-life, and neighbor top-K. Session history and target-specific popularity provide high-precision revisits and cold-start fallback.
 
@@ -144,18 +144,18 @@ Neural sources emit normalized session queries and item vectors. ANN results ent
 
 ## 10. Features and Ranking
 
-Initial features include candidate score/rank/source agreement, all seven source-specific
-presence/score/rank triples, session length and uniqueness, item frequency and recency in the
-session, and per-action counts.
+Features include candidate score/rank/source agreement, source-specific presence/score/rank,
+session length/duration/type counts/gaps/duplicate rate, and session-aid frequency, action
+counts, first/last position, event recency, and time recency.
 
 Three target-specific XGBoost models use `rank:ndcg`, one query group per session, histogram
 trees, deterministic seeds, validation early stopping, and positive-preserving candidate
 limits. Training keeps every positive plus the first 80 fused candidates; validation keeps the
 first 120 by default while the metric denominator continues to use all original labels. Group
-sizes must sum exactly to the row count. The bounded workstation profile deterministically
-selects the first 50,000 eligible query sessions per target for training and evaluation; the
-ranker manifest records these limits. GPU training is requested explicitly and must not silently
-fall back.
+sizes must sum exactly to the row count. The bounded workstation profile selects a
+seed-controlled stable sample of 50,000 eligible queries per target and preserves every positive
+while sampling target-specific negatives. The full candidate quality report is never
+query-sampled. GPU training is requested explicitly and must not silently fall back.
 
 ## 11. Modern Retrieval Experiments
 
