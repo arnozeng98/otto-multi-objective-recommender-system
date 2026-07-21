@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from otto_recsys.artifacts import stable_hash
@@ -70,23 +71,45 @@ def concatenate_event_parquets(
 
 
 def _maximum_timestamp(source: Path, batch_rows: int) -> int:
+    parquet = pq.ParquetFile(source)
+    timestamp_index = parquet.schema_arrow.get_field_index("ts")
+    maxima: list[int] = []
+    for row_group_index in range(parquet.num_row_groups):
+        statistics = parquet.metadata.row_group(row_group_index).column(timestamp_index).statistics
+        if statistics is None or not statistics.has_min_max:
+            maxima.clear()
+            break
+        maxima.append(int(statistics.max))
+    if maxima:
+        return max(maxima)
+
     maximum: int | None = None
-    for session in iter_parquet_sessions(source, batch_rows=batch_rows):
-        session_maximum = max(event.ts for event in session.events)
-        maximum = session_maximum if maximum is None else max(maximum, session_maximum)
+    for batch in parquet.iter_batches(batch_size=batch_rows, columns=["ts"]):
+        batch_maximum = pc.max(batch.column(0)).as_py()
+        if batch_maximum is not None:
+            maximum = int(batch_maximum) if maximum is None else max(maximum, int(batch_maximum))
     if maximum is None:
         raise ValueError("Cannot split an empty event source")
     return maximum
 
 
 def _known_aids(source: Path, cutoff_timestamp_ms: int, batch_rows: int) -> set[int]:
-    known: set[int] = set()
+    return _known_aids_for_cutoffs(source, (cutoff_timestamp_ms,), batch_rows)[cutoff_timestamp_ms]
+
+
+def _known_aids_for_cutoffs(
+    source: Path,
+    cutoffs: tuple[int, ...],
+    batch_rows: int,
+) -> dict[int, set[int]]:
+    known: dict[int, set[int]] = {cutoff: set() for cutoff in cutoffs}
     for session in iter_parquet_sessions(source, batch_rows=batch_rows):
-        if session.events[0].ts > cutoff_timestamp_ms:
-            continue
-        events = tuple(event for event in session.events if event.ts < cutoff_timestamp_ms)
-        if len(events) >= 2:
-            known.update(event.aid for event in events)
+        for cutoff in cutoffs:
+            if session.events[0].ts > cutoff:
+                continue
+            events = tuple(event for event in session.events if event.ts < cutoff)
+            if len(events) >= 2:
+                known[cutoff].update(event.aid for event in events)
     return known
 
 
@@ -100,6 +123,7 @@ def materialize_official_temporal_split(
     batch_rows: int = 250_000,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
+    known_aids: set[int] | None = None,
 ) -> TemporalMaterializationResult:
     """Materialize one organizer-compatible train/context/label window."""
     if cutoff_timestamp_ms >= cohort_end_timestamp_ms:
@@ -111,7 +135,7 @@ def materialize_official_temporal_split(
     if temporary.exists():
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True)
-    known_aids = _known_aids(source, cutoff_timestamp_ms, batch_rows)
+    known_aids = known_aids or _known_aids(source, cutoff_timestamp_ms, batch_rows)
     rng = random.Random(seed)
     matrix_rows: list[dict[str, Any]] = []
     context_rows: list[dict[str, Any]] = []
@@ -237,6 +261,11 @@ def materialize_official_validation_views(
     window = validation_days * 24 * 60 * 60 * 1_000
     validation_cutoff = maximum - window
     training_cutoff = validation_cutoff - window
+    known_aids = _known_aids_for_cutoffs(
+        source,
+        (training_cutoff, validation_cutoff),
+        batch_rows,
+    )
     temporary = destination.with_name(f"{destination.name}.tmp")
     if temporary.exists():
         shutil.rmtree(temporary)
@@ -250,6 +279,7 @@ def materialize_official_validation_views(
             seed=seed,
             batch_rows=batch_rows,
             progress=progress,
+            known_aids=known_aids[training_cutoff],
         )
         local_validation = materialize_official_temporal_split(
             source,
@@ -259,6 +289,7 @@ def materialize_official_validation_views(
             seed=seed,
             batch_rows=batch_rows,
             progress=progress,
+            known_aids=known_aids[validation_cutoff],
         )
         result = ValidationViewsResult(ranker_train, local_validation)
         (temporary / "manifest.json").write_text(

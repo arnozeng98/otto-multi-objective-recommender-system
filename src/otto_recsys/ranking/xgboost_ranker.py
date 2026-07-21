@@ -61,6 +61,7 @@ def train_ranker(
     seed: int = 2026,
     max_depth: int = 8,
     learning_rate: float = 0.08,
+    nthread: int = 8,
     early_stopping_rounds: int | None = None,
 ) -> RankerModel:
     """Train a LambdaMART ranker with explicit, validated session groups."""
@@ -68,7 +69,8 @@ def train_ranker(
 
     if sum(group_sizes) != len(labels) or len(features) != len(labels):
         raise ValueError("Group sizes, features, and labels must describe the same rows")
-    matrix = xgb.DMatrix(features, label=labels, feature_names=list(feature_names))
+    matrix_type = xgb.QuantileDMatrix if device.startswith("cuda") else xgb.DMatrix
+    matrix = matrix_type(features, label=labels, feature_names=list(feature_names))
     matrix.set_group(group_sizes)
     evals: list[tuple[Any, str]] = []
     if validation_features is not None:
@@ -78,10 +80,12 @@ def train_ranker(
             validation_labels
         ):
             raise ValueError("Validation groups, features, and labels must describe the same rows")
-        validation_matrix = xgb.DMatrix(
+        validation_options = {"ref": matrix} if device.startswith("cuda") else {}
+        validation_matrix = matrix_type(
             validation_features,
             label=validation_labels,
             feature_names=list(feature_names),
+            **validation_options,
         )
         validation_matrix.set_group(validation_group_sizes)
         evals.append((validation_matrix, "validation"))
@@ -93,6 +97,7 @@ def train_ranker(
         "max_depth": max_depth,
         "eta": learning_rate,
         "seed": seed,
+        "nthread": nthread,
     }
     booster = xgb.train(
         params,

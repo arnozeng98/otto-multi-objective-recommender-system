@@ -176,6 +176,7 @@ def build_covisitation_suite_command(
     partitions: int = typer.Option(64, min=1),
     pair_buffer_size: int = typer.Option(500_000, min=1),
     batch_rows: int = typer.Option(250_000, min=1),
+    reduction_workers: int = typer.Option(1, min=1),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     """Build all five default co-visitation matrices."""
@@ -186,6 +187,7 @@ def build_covisitation_suite_command(
         partitions=partitions,
         pair_buffer_size=pair_buffer_size,
         batch_rows=batch_rows,
+        reduction_workers=reduction_workers,
         overwrite=overwrite,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
@@ -222,6 +224,8 @@ def materialize_candidates_command(
         history_budget=config.candidates.history_budget,
         covisitation_budget=config.candidates.covisitation_budget,
         max_events_per_session=config.covisitation.max_events_per_session,
+        workers=config.candidates.workers,
+        chunk_sessions=config.candidates.chunk_sessions,
         batch_rows=batch_rows,
         overwrite=overwrite,
     )
@@ -248,6 +252,7 @@ def train_rankers_command(
         rounds=config.ranking.rounds,
         max_depth=config.ranking.max_depth,
         learning_rate=config.ranking.learning_rate,
+        nthread=config.ranking.nthread,
         seed=config.project.seed,
         training_candidate_limit=config.ranking.training_candidate_limit,
         validation_candidate_limit=config.ranking.validation_candidate_limit,

@@ -106,6 +106,7 @@ def train_ranker_suite(
     rounds: int = 500,
     max_depth: int = 8,
     learning_rate: float = 0.08,
+    nthread: int = 8,
     seed: int = 2026,
     early_stopping_rounds: int = 30,
     training_candidate_limit: int = 80,
@@ -177,6 +178,7 @@ def train_ranker_suite(
                 seed=seed,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
+                nthread=nthread,
                 early_stopping_rounds=early_stopping_rounds,
             )
             model.save(temporary / f"{target.value}.json")
@@ -218,6 +220,7 @@ def train_ranker_suite(
                     "rounds": rounds,
                     "max_depth": max_depth,
                     "learning_rate": learning_rate,
+                    "nthread": nthread,
                     "seed": seed,
                     "training_candidate_limit": training_candidate_limit,
                     "validation_candidate_limit": validation_candidate_limit,
@@ -256,6 +259,7 @@ def refit_ranker_suite(
     rounds: int = 500,
     max_depth: int = 8,
     learning_rate: float = 0.08,
+    nthread: int = 8,
     seed: int = 2026,
     candidate_limit: int = 80,
     query_limit: int = 50_000,
@@ -316,6 +320,7 @@ def refit_ranker_suite(
             seed=seed,
             max_depth=max_depth,
             learning_rate=learning_rate,
+            nthread=nthread,
         )
         model.save(model_path)
         training_rows[target.value] = len(training)
@@ -333,6 +338,7 @@ def refit_ranker_suite(
                     {
                         "candidate_sources": [str(path) for path in candidate_sources],
                         "device": device,
+                        "nthread": nthread,
                         "rounds": rounds,
                         "max_depth": max_depth,
                         "learning_rate": learning_rate,

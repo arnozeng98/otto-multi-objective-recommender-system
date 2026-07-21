@@ -213,6 +213,18 @@ files are removed, all targets roll back to their greatest common complete sessi
 continues without duplicate or missing query groups. Matrix and store suites similarly retain
 completed child manifests across interruptions.
 
+The single-GPU profile uses four bounded `spawn` candidate workers with at most two tasks per
+worker in flight. Workers open independent read-only mmap stores and write target shards directly;
+the coordinator advances only across contiguous completed task IDs. Candidate retention is tied
+to downstream contracts (train 80 plus positives, validation 150 plus positives, inference 120),
+so unused negatives are removed before feature construction. Public matrix rules share one input
+session scan, and independent partition reductions use two bounded workers.
+
+XGBoost CUDA training uses `QuantileDMatrix` and a bounded host thread count. NumPy prediction
+continues through explicit `DMatrix`: `inplace_predict` with host NumPy arrays causes a device
+mismatch fallback unless CuPy is installed. CPU/GPU utilization is therefore interpreted by
+stage rather than expected to remain high throughout the pipeline.
+
 ## 13. Failure Handling
 
 - Invalid input event types fail during conversion.

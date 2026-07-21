@@ -76,6 +76,7 @@ def test_partitioned_matrix_matches_in_memory_reference(tmp_path: Path) -> None:
         partitions=2,
         pair_buffer_size=2,
         batch_rows=2,
+        reduction_workers=2,
     )
 
     frames = [pl.read_parquet(path) for path in sorted((destination / "matrix").glob("*.parquet"))]

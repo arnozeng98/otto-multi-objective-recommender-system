@@ -148,7 +148,7 @@ def run_full_pipeline(
                 train,
                 validation_run,
                 config,
-                show_progress=False,
+                show_progress=show_progress,
                 allow_low_score=allow_low_score,
             )
             stages["validation"] = "completed"
@@ -203,6 +203,7 @@ def run_full_pipeline(
                 batch_rows=config.covisitation.batch_rows,
                 max_events_per_session=config.covisitation.max_events_per_session,
                 profile=config.covisitation.profile,
+                reduction_workers=config.covisitation.reduction_workers,
                 progress=progress.advance,
             )
             stages["full_history_matrices"] = "completed"
@@ -255,6 +256,9 @@ def run_full_pipeline(
                 query_contexts=test_events,
                 popularity_events=inference_events,
                 include_labels=False,
+                retention_limit=config.ranking.validation_candidate_limit,
+                workers=config.candidates.workers,
+                chunk_sessions=config.candidates.chunk_sessions,
                 progress=progress.advance,
             )
             stages["test_candidates"] = "completed"
@@ -281,6 +285,7 @@ def run_full_pipeline(
                     rounds=config.ranking.rounds,
                     max_depth=config.ranking.max_depth,
                     learning_rate=config.ranking.learning_rate,
+                    nthread=config.ranking.nthread,
                     seed=config.project.seed,
                     candidate_limit=config.ranking.training_candidate_limit,
                     query_limit=config.ranking.training_query_limit,

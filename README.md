@@ -270,6 +270,12 @@ Modern models are candidate sources, not replacements for the full system. A sou
 - Neural item embeddings default to 48–64 dimensions.
 - Full item softmax is avoided; training uses sampled candidates and hard negatives.
 - Candidate fusion is capped at roughly 200–350 unique items per session and target.
+- Candidate generation uses four bounded `spawn` workers in the single-GPU profile. Each worker
+	opens read-only matrix mmaps and writes atomic target shards; `spawn` avoids inheriting an
+	initialized Polars/Arrow thread pool under Linux.
+- Training persists top-80 candidates plus every positive, validation persists top-150 plus
+	every positive, and test inference persists top-120. Candidates outside these downstream
+	contracts are discarded before feature dictionaries are built.
 - Ranker input keeps all positives plus the first 80 training candidates and first 120
 	validation candidates per query by default.
 - Ranker training and evaluation use seed-controlled 50,000-query samples per target by default
@@ -278,6 +284,12 @@ Modern models are candidate sources, not replacements for the full system. A sou
 	clicks/carts/orders. Inference co-visitation and popularity use the allowed unlabeled
 	`train + test context` corpus; supervised labels never enter these artifacts.
 - Research profiles run separately so a baseline iteration remains within several hours.
+
+On the verified 10,000-session ranker-training slice, bounded four-process candidate generation
+completed in 21.64 seconds versus 59.14 seconds for one process (`2.73x` faster), with identical
+click/cart/order Parquet rows and features. CPU utilization increased from 150% to 531% without
+swap. GPU utilization remains low during ETL, co-visitation, and candidates by design; CUDA is
+used for XGBoost training and scoring.
 
 The in-memory reference builder remains useful for tests and bounded slices. Full-data runs use
 the hash-partitioned builder above; its output is tested item-for-item against the reference

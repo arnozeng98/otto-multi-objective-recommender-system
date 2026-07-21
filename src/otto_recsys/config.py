@@ -44,6 +44,8 @@ class CandidateConfig(StrictModel):
     history_budget: int = Field(default=50, ge=0)
     popularity_budget: int = Field(default=40, ge=0)
     covisitation_budget: int = Field(default=180, ge=0)
+    workers: int = Field(default=1, ge=1)
+    chunk_sessions: int = Field(default=5_000, ge=1)
 
 
 class CovisitationConfig(StrictModel):
@@ -53,10 +55,12 @@ class CovisitationConfig(StrictModel):
     partitions: int = Field(default=64, ge=1)
     pair_buffer_size: int = Field(default=500_000, ge=1)
     batch_rows: int = Field(default=250_000, ge=1)
+    reduction_workers: int = Field(default=1, ge=1)
 
 
 class RankingConfig(StrictModel):
     device: str = "cuda"
+    nthread: int = Field(default=8, ge=1)
     max_depth: int = Field(default=8, ge=1)
     learning_rate: float = Field(default=0.08, gt=0)
     rounds: int = Field(default=500, ge=1)

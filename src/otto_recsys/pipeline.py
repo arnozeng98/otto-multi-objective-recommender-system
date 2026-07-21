@@ -197,6 +197,7 @@ def run_validation_pipeline(
                     batch_rows=config.covisitation.batch_rows,
                     max_events_per_session=config.covisitation.max_events_per_session,
                     profile=config.covisitation.profile,
+                    reduction_workers=config.covisitation.reduction_workers,
                     progress=progress.advance,
                 )
                 stages[matrix_stage] = "completed"
@@ -242,6 +243,13 @@ def run_validation_pipeline(
                     history_budget=config.candidates.history_budget,
                     covisitation_budget=config.candidates.covisitation_budget,
                     max_events_per_session=config.covisitation.max_events_per_session,
+                    retention_limit=(
+                        config.ranking.training_candidate_limit
+                        if view_name == "ranker_train"
+                        else max(config.ranking.validation_candidate_limit, 150)
+                    ),
+                    workers=config.candidates.workers,
+                    chunk_sessions=config.candidates.chunk_sessions,
                     progress=progress.advance,
                 )
                 stages[candidate_stage] = "completed"
@@ -280,6 +288,7 @@ def run_validation_pipeline(
                 rounds=config.ranking.rounds,
                 max_depth=config.ranking.max_depth,
                 learning_rate=config.ranking.learning_rate,
+                nthread=config.ranking.nthread,
                 seed=config.project.seed,
                 training_candidate_limit=config.ranking.training_candidate_limit,
                 validation_candidate_limit=config.ranking.validation_candidate_limit,

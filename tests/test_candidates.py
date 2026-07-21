@@ -327,6 +327,66 @@ def test_materialize_candidates_supports_unlabeled_inference(tmp_path: Path) -> 
         assert frame["label"].sum() == 0
 
 
+def test_candidate_retention_keeps_all_positives(tmp_path: Path) -> None:
+    source = tmp_path / "sessions.jsonl"
+    source.write_text(
+        "\n".join(
+            map(
+                json.dumps,
+                [
+                    {
+                        "session": 1,
+                        "events": [
+                            {"aid": 10, "ts": 100, "type": "clicks"},
+                            {"aid": 20, "ts": 200, "type": "orders"},
+                            {"aid": 30, "ts": 300, "type": "orders"},
+                        ],
+                    },
+                    {
+                        "session": 2,
+                        "events": [
+                            {"aid": 20, "ts": 110, "type": "orders"},
+                            {"aid": 30, "ts": 120, "type": "orders"},
+                        ],
+                    },
+                ],
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parquet = tmp_path / "events.parquet"
+    view = tmp_path / "view"
+    matrices = tmp_path / "matrices"
+    stores = tmp_path / "stores"
+    candidates = tmp_path / "candidates"
+    convert_jsonl_to_parquet(source, parquet, batch_events=1)
+    materialize_temporal_split(parquet, view, 150)
+    build_covisitation_suite(
+        view / "matrix_events.parquet",
+        matrices,
+        max_neighbors=3,
+        partitions=2,
+        pair_buffer_size=1,
+        batch_rows=1,
+    )
+    build_matrix_store_suite(matrices, stores)
+
+    materialize_candidates(
+        view,
+        stores,
+        candidates,
+        budget=3,
+        popularity_budget=3,
+        retention_limit=1,
+        batch_rows=2,
+    )
+
+    orders = pl.read_parquet(candidates / "orders" / "*.parquet")
+    assert orders.filter(pl.col("label") == 0)["candidate_rank"].max() <= 1
+    assert set(orders.filter(pl.col("label") > 0)["aid"]) == {20, 30}
+
+
 def test_candidate_materialization_resumes_synchronized_checkpoint(tmp_path: Path) -> None:
     source = tmp_path / "sessions.jsonl"
     records = [
@@ -384,6 +444,83 @@ def test_candidate_materialization_resumes_synchronized_checkpoint(tmp_path: Pat
     for target in EventType:
         actual = pl.read_parquet(destination / target.value / "*.parquet")
         assert actual.equals(completed[target.value])
+
+
+def test_parallel_candidate_materialization_matches_single_process(tmp_path: Path) -> None:
+    source = tmp_path / "sessions.jsonl"
+    records = [
+        {
+            "session": session,
+            "events": [
+                {"aid": 10, "ts": 100, "type": "clicks"},
+                {"aid": 20 + session, "ts": 200, "type": "orders"},
+            ],
+        }
+        for session in range(1, 7)
+    ]
+    source.write_text("\n".join(map(json.dumps, records)) + "\n", encoding="utf-8")
+    parquet = tmp_path / "events.parquet"
+    view = tmp_path / "view"
+    matrices = tmp_path / "matrices"
+    stores = tmp_path / "stores"
+    single = tmp_path / "single"
+    parallel = tmp_path / "parallel"
+    convert_jsonl_to_parquet(source, parquet, batch_events=1)
+    materialize_temporal_split(parquet, view, 150)
+    build_covisitation_suite(
+        view / "matrix_events.parquet",
+        matrices,
+        max_neighbors=2,
+        partitions=2,
+        pair_buffer_size=1,
+        batch_rows=1,
+    )
+    build_matrix_store_suite(matrices, stores)
+
+    expected = materialize_candidates(
+        view,
+        stores,
+        single,
+        budget=3,
+        popularity_budget=2,
+        retention_limit=2,
+        batch_rows=3,
+    )
+    actual = materialize_candidates(
+        view,
+        stores,
+        parallel,
+        budget=3,
+        popularity_budget=2,
+        retention_limit=2,
+        workers=2,
+        chunk_sessions=2,
+        batch_rows=3,
+    )
+
+    assert actual == expected
+    for target in EventType:
+        expected_frame = pl.read_parquet(single / target.value / "*.parquet").sort(
+            "session", "candidate_rank"
+        )
+        actual_frame = pl.read_parquet(parallel / target.value / "*.parquet").sort(
+            "session", "candidate_rank"
+        )
+        assert actual_frame.equals(expected_frame)
+
+    parallel.rename(parallel.with_name("parallel.tmp"))
+    resumed = materialize_candidates(
+        view,
+        stores,
+        parallel,
+        budget=3,
+        popularity_budget=2,
+        retention_limit=2,
+        workers=2,
+        chunk_sessions=2,
+        batch_rows=3,
+    )
+    assert resumed == expected
 
 
 def test_candidate_materialization_salvages_legacy_corrupt_tail(tmp_path: Path) -> None:
