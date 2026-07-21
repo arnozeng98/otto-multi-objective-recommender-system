@@ -217,6 +217,13 @@ Official validation writes full candidate Recall@20/50/80/100/150, source union 
 recall, positive-rank histograms, and session-length buckets. Production stops before ranker
 training when rules Recall@20 is below `0.54` or candidate Recall@100 is below `0.62`.
 `--allow-low-score` exists only for diagnostics and must not be used for a submission run.
+Validated rankers must also match or improve the rules Recall@20; otherwise the full pipeline
+automatically promotes deterministic candidate ranks rather than shipping a regressing model.
+
+The completed v2 official validation measured weighted rules Recall@20 `0.557253`, candidate
+Recall@100 `0.624207`, and sampled LambdaMART Recall@20 `0.048900`. The release strategy is
+therefore `rules`; the ranker artifact remains available for diagnosis but is not used for the
+submission.
 
 Interrupted runs resume automatically. Completed stage manifests are reused, matrix/store suites
 reuse completed child rules, and candidate materialization checkpoints synchronized three-target

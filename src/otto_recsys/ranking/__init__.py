@@ -1,4 +1,8 @@
-from otto_recsys.ranking.inference import InferenceResult, score_candidate_suite
+from otto_recsys.ranking.inference import (
+    InferenceResult,
+    rank_candidate_suite,
+    score_candidate_suite,
+)
 from otto_recsys.ranking.pipeline import (
     RankerSuiteResult,
     RefitSuiteResult,
@@ -13,6 +17,7 @@ __all__ = [
     "RankerSuiteResult",
     "RefitSuiteResult",
     "refit_ranker_suite",
+    "rank_candidate_suite",
     "score_candidate_suite",
     "train_ranker",
     "train_ranker_suite",

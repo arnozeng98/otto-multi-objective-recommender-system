@@ -50,6 +50,82 @@ def _score_part(
     return ranked["session"].n_unique(), len(ranked)
 
 
+def _rank_part(source: Path, destination: Path, target: EventType) -> tuple[int, int]:
+    ranked = (
+        pl.read_parquet(source, columns=["session", "aid", "candidate_rank"])
+        .filter(pl.col("candidate_rank") <= 20)
+        .with_columns(
+            pl.lit(target.value).alias("target"),
+            pl.col("candidate_rank").cast(pl.UInt32).alias("rank"),
+            (-pl.col("candidate_rank")).cast(pl.Float32).alias("score"),
+        )
+        .select("session", "target", "aid", "score", "rank")
+    )
+    temporary = destination.with_suffix(".parquet.tmp")
+    ranked.write_parquet(temporary, compression="zstd", statistics=True)
+    os.replace(temporary, destination)
+    return ranked["session"].n_unique(), len(ranked)
+
+
+def rank_candidate_suite(
+    candidates: Path,
+    destination: Path,
+    *,
+    overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
+) -> InferenceResult:
+    """Promote deterministic candidate ranks to resumable top-20 prediction shards."""
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {destination}")
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    if overwrite and temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir(parents=True, exist_ok=True)
+    sessions: dict[str, int] = {}
+    predictions: dict[str, int] = {}
+    for target in EVENT_TYPES:
+        target_dir = temporary / target.value
+        target_dir.mkdir(exist_ok=True)
+        target_sessions = 0
+        target_predictions = 0
+        for source in sorted((candidates / target.value).glob("part-*.parquet")):
+            output = target_dir / source.name
+            if output.exists():
+                try:
+                    completed = pl.read_parquet(output, columns=["session"])
+                except Exception:
+                    output.unlink(missing_ok=True)
+                else:
+                    target_sessions += completed["session"].n_unique()
+                    target_predictions += len(completed)
+                    if progress is not None:
+                        progress(1)
+                    continue
+            part_sessions, part_predictions = _rank_part(source, output, target)
+            target_sessions += part_sessions
+            target_predictions += part_predictions
+            if progress is not None:
+                progress(1)
+        sessions[target.value] = target_sessions
+        predictions[target.value] = target_predictions
+    result = InferenceResult(sessions=sessions, predictions=predictions)
+    manifest = {
+        "stage": "rules_inference",
+        "config_hash": stable_hash(
+            {"candidates": str(candidates.resolve()), "top_k": 20, "strategy": "rules"}
+        ),
+        "inputs": {"candidates": str(candidates)},
+        "result": asdict(result),
+    }
+    (temporary / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.move(str(temporary), str(destination))
+    return result
+
+
 def score_candidate_suite(
     candidates: Path,
     models: Path,

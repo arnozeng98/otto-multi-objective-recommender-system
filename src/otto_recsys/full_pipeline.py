@@ -15,7 +15,7 @@ from otto_recsys.data.materialize import concatenate_event_parquets
 from otto_recsys.data.preprocess import convert_jsonl_to_parquet
 from otto_recsys.pipeline import run_validation_pipeline
 from otto_recsys.progress import create_progress
-from otto_recsys.ranking import refit_ranker_suite, score_candidate_suite
+from otto_recsys.ranking import rank_candidate_suite, refit_ranker_suite, score_candidate_suite
 from otto_recsys.submission import SubmissionResult, write_submission_from_shards
 
 
@@ -63,6 +63,16 @@ def _compatible_validation_run(path: Path, train: Path, config: AppConfig) -> bo
     if validation_config.get("strategy") != config.validation.strategy:
         return False
     return _is_subset(payload.get("config", {}), config.model_dump(mode="json"))
+
+
+def _validated_strategy(validation_run: Path, requested: str) -> str:
+    if requested != "validated":
+        return requested
+    candidate = json.loads((validation_run / "candidate-recall.json").read_text(encoding="utf-8"))
+    ranker = json.loads((validation_run / "rankers" / "manifest.json").read_text(encoding="utf-8"))
+    rules_score = float(candidate["weighted_recall_at_20"])
+    ranker_score = float(ranker["result"]["weighted_recall_at_20"])
+    return "validated" if ranker_score >= rules_score else "rules"
 
 
 def _write_spec(destination: Path, spec: dict[str, Any], overwrite: bool) -> str:
@@ -153,6 +163,7 @@ def run_full_pipeline(
             )
             stages["validation"] = "completed"
             progress.finish("completed")
+        selected_strategy = _validated_strategy(validation_run, config.ranking.model_strategy)
 
         test_events = destination / "test-events.parquet"
         test_report = destination / "test-preprocess.json"
@@ -265,7 +276,11 @@ def run_full_pipeline(
             progress.finish("completed")
 
         progress.start_stage(6, 8, stage_names[5], total=3, unit="targets")
-        if config.ranking.model_strategy == "validated":
+        if selected_strategy == "rules":
+            models = None
+            stages["final_rankers"] = "skipped-rules-better"
+            progress.finish("skipped-rules-better")
+        elif selected_strategy == "validated":
             models = validation_run / "rankers"
             stages["final_rankers"] = "reused"
             progress.finish("reused")
@@ -302,13 +317,17 @@ def run_full_pipeline(
             stages["test_predictions"] = "reused"
             progress.finish("reused")
         else:
-            score_candidate_suite(
-                candidates,
-                models,
-                predictions,
-                device=config.ranking.device,
-                progress=progress.advance,
-            )
+            if selected_strategy == "rules":
+                rank_candidate_suite(candidates, predictions, progress=progress.advance)
+            else:
+                assert models is not None
+                score_candidate_suite(
+                    candidates,
+                    models,
+                    predictions,
+                    device=config.ranking.device,
+                    progress=progress.advance,
+                )
             stages["test_predictions"] = "completed"
             progress.finish("completed")
 
@@ -340,7 +359,7 @@ def run_full_pipeline(
         reused=False,
         stages=stages,
         validation_run=str(validation_run),
-        model_strategy=config.ranking.model_strategy,
+        model_strategy=selected_strategy,
         submission=str(submission_path),
         submission_result=submission_result,
     )

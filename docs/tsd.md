@@ -225,6 +225,12 @@ continues through explicit `DMatrix`: `inplace_predict` with host NumPy arrays c
 mismatch fallback unless CuPy is installed. CPU/GPU utilization is therefore interpreted by
 stage rather than expected to remain high throughout the pipeline.
 
+The publication gate compares the evaluated ranker with the rules ordering. A validated ranker
+is selected only when its Recall@20 is no lower than candidate-rank Recall@20; otherwise inference
+skips model preparation and atomically promotes candidate-rank top-20 shards. The first complete
+v2 validation selected this fallback (`0.557253` rules versus `0.048900` ranker), preventing a
+known regression from reaching the submission.
+
 ## 13. Failure Handling
 
 - Invalid input event types fail during conversion.
