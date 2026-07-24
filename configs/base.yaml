@@ -4,6 +4,12 @@ project:
   data_dir: data
 
 validation:
+  strategy: official_random_event
+  days: 7
+  seed: 42
+  minimum_rules_recall_at_20: 0.54
+  minimum_candidate_recall_at_100: 0.62
+  enforce_quality_gate: true
   training_cutoff_timestamp_ms: 1660514400000
   cutoff_timestamp_ms: 1661119200000
   top_k: 20
@@ -13,19 +19,32 @@ candidates:
   history_budget: 50
   popularity_budget: 40
   covisitation_budget: 180
+  workers: 1
+  chunk_sessions: 5000
 
 covisitation:
+  profile: public_v575
   max_events_per_session: 30
   max_neighbors: 80
   partitions: 64
+  pair_buffer_size: 500000
+  batch_rows: 250000
+  reduction_workers: 1
 
 ranking:
   device: cuda
+  nthread: 8
   max_depth: 8
   learning_rate: 0.08
   rounds: 500
   training_candidate_limit: 80
   validation_candidate_limit: 120
+  training_query_limit: 50000
+  validation_query_limit: 50000
+  clicks_negative_sample_rate: 0.05
+  carts_negative_sample_rate: 0.25
+  orders_negative_sample_rate: 0.40
+  model_strategy: validated
 
 neural:
   embedding_dim: 64

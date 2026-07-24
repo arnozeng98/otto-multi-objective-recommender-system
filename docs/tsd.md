@@ -108,8 +108,10 @@ The CSV header is `session_type,labels`. Each test session has exactly three row
 
 ## 8. Temporal Validation and Leakage Rules
 
-- An earlier cutoff creates ranker-training queries; its label window ends at the final
-	validation cutoff.
+- The default split follows the organizer's new-session cohort, known-aid filtering, seeded
+	random context event, next-click label, and future cart/order set semantics.
+- An earlier official seven-day window creates ranker-training queries; the following window
+	is the complete candidate-quality evaluation cohort.
 - The final cutoff creates local-validation queries and labels.
 - Popularity, matrices, embeddings, and features use context/training events only.
 - Validation labels never enter pair counts, hard-negative pools, or item popularity.
@@ -119,13 +121,11 @@ The CSV header is `session_type,labels`. Each test session has exactly three row
 
 ## 9. Candidate Generation
 
-The default single-GPU profile uses five configurable matrix families:
+The default single-GPU profile reproduces the public three-matrix rules baseline:
 
-1. Adjacent forward click transitions.
-2. All-event pairs with exponential time decay.
-3. Forward click/cart/order to cart/order pairs.
-4. Cart/order to cart/order pairs.
-5. Recent-window trend pairs.
+1. All-to-all 24-hour pairs with the public absolute timestamp weight.
+2. All-event to cart/order pairs with target weights 6 and 3.
+3. Cart/order to cart/order pairs over 14 days.
 
 The generic rule supports source and target event filters, direction, sequence distance, time window, half-life, and neighbor top-K. Session history and target-specific popularity provide high-precision revisits and cold-start fallback.
 
@@ -144,16 +144,18 @@ Neural sources emit normalized session queries and item vectors. ANN results ent
 
 ## 10. Features and Ranking
 
-Initial features include candidate score/rank/source agreement, all seven source-specific
-presence/score/rank triples, session length and uniqueness, item frequency and recency in the
-session, and per-action counts.
+Features include candidate score/rank/source agreement, source-specific presence/score/rank,
+session length/duration/type counts/gaps/duplicate rate, and session-aid frequency, action
+counts, first/last position, event recency, and time recency.
 
 Three target-specific XGBoost models use `rank:ndcg`, one query group per session, histogram
 trees, deterministic seeds, validation early stopping, and positive-preserving candidate
 limits. Training keeps every positive plus the first 80 fused candidates; validation keeps the
 first 120 by default while the metric denominator continues to use all original labels. Group
-sizes must sum exactly to the row count. GPU training is requested explicitly and must not
-silently fall back.
+sizes must sum exactly to the row count. The bounded workstation profile selects a
+seed-controlled stable sample of 50,000 eligible queries per target and preserves every positive
+while sampling target-specific negatives. The full candidate quality report is never
+query-sampled. GPU training is requested explicitly and must not silently fall back.
 
 ## 11. Modern Retrieval Experiments
 
@@ -187,20 +189,47 @@ otto-recsys build-covisitation artifacts/events/train.parquet artifacts/covisita
 otto-recsys prepare-validation artifacts/events/train.parquet artifacts/validation/views --config configs/single_gpu.yaml
 otto-recsys build-covisitation-suite artifacts/validation/views/ranker_train/matrix_events.parquet artifacts/validation/matrices/ranker_train
 otto-recsys build-matrix-store artifacts/validation/matrices/ranker_train artifacts/validation/stores/ranker_train
-otto-recsys run data/train.jsonl artifacts/single_gpu/validation --config configs/single_gpu.yaml
+otto-recsys run-validation data/train.jsonl artifacts/single_gpu/full-validation --config configs/single_gpu.yaml
+otto-recsys run artifacts/single_gpu/full-run --config configs/single_gpu.yaml
 otto-recsys smoke artifacts/smoke
 ```
 
 Long stages write immutable outputs plus a manifest. A stage may reuse output only when its
-configuration hash and all upstream fingerprints match. The nine-stage `run` command renders a
-Rich progress dashboard with step numbering, work units, elapsed time, and ETA; `--no-progress`
-keeps non-interactive output stable.
+configuration hash and all upstream fingerprints match. The `run-validation` command owns local
+temporal evaluation. The primary `run DESTINATION` command defaults to the repository train,
+test, sample-submission, and single-GPU profile paths, imports compatible validation artifacts,
+and continues through full-history retrieval, test inference, and an atomically validated
+`DESTINATION/submission/submission.csv`. Rich reports step numbering, work units, elapsed time,
+and ETA; `--no-progress` keeps non-interactive output stable.
+
+The `validated` model strategy reuses the evaluated temporal rankers. The optional `refit`
+strategy trains separately identified final models from complete query groups sampled across
+both temporal windows. Refit models never consume test events and do not inherit validation
+metrics that were measured on different model artifacts.
 
 Candidate shards are committed in synchronized three-target session chunks. An atomic checkpoint
 advances only after all clicks, carts, and orders shards are durable. On restart, invalid tail
 files are removed, all targets roll back to their greatest common complete session, and processing
 continues without duplicate or missing query groups. Matrix and store suites similarly retain
 completed child manifests across interruptions.
+
+The single-GPU profile uses four bounded `spawn` candidate workers with at most two tasks per
+worker in flight. Workers open independent read-only mmap stores and write target shards directly;
+the coordinator advances only across contiguous completed task IDs. Candidate retention is tied
+to downstream contracts (train 80 plus positives, validation 150 plus positives, inference 120),
+so unused negatives are removed before feature construction. Public matrix rules share one input
+session scan, and independent partition reductions use two bounded workers.
+
+XGBoost CUDA training uses `QuantileDMatrix` and a bounded host thread count. NumPy prediction
+continues through explicit `DMatrix`: `inplace_predict` with host NumPy arrays causes a device
+mismatch fallback unless CuPy is installed. CPU/GPU utilization is therefore interpreted by
+stage rather than expected to remain high throughout the pipeline.
+
+The publication gate compares the evaluated ranker with the rules ordering. A validated ranker
+is selected only when its Recall@20 is no lower than candidate-rank Recall@20; otherwise inference
+skips model preparation and atomically promotes candidate-rank top-20 shards. The first complete
+v2 validation selected this fallback (`0.557253` rules versus `0.048900` ranker), preventing a
+known regression from reaching the submission.
 
 ## 13. Failure Handling
 
@@ -211,6 +240,9 @@ completed child manifests across interruptions.
 - CUDA out-of-memory is handled by reducing profile batch size or enabling accumulation, never by changing model semantics silently.
 - Partial long-running output is written to a temporary path and promoted only after validation.
 - Power loss preserves the last atomic candidate checkpoint and completed matrix/store children.
+- Test inference writes atomic per-target prediction shards and resumes completed shards.
+- Submission output is written to a temporary CSV and promoted only after sample-order, coverage,
+	row-count, uniqueness, and label-count checks pass.
 
 ## 14. Experiment Methodology
 
@@ -243,8 +275,8 @@ The dataset contains anonymous session and product IDs rather than account ident
 
 - The measured 1,000-session weighted Recall@20 of 0.123803 is an engineering acceptance
 	result, not a leaderboard estimate.
-- Full-data co-visitation and lookup are bounded by partition, but full-data ranker runtime,
-	candidate storage, and peak DMatrix memory still require measurement.
+- Full-history matrix and test-candidate runtime remains CPU/NVMe-bound; GPU utilization is
+	expected primarily during XGBoost training/inference and optional neural workloads.
 - CUDA extension compatibility depends on Linux, installed PyTorch/CUDA versions, and Blackwell support.
 - Mamba is unavailable in the verified PyTorch 2.13/cu130 environment because neither a
 	compatible wheel nor a compatible local extension compiler/header combination is available.

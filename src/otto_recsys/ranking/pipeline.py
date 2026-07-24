@@ -15,7 +15,7 @@ from otto_recsys.constants import EVENT_TYPES, EventType
 from otto_recsys.metrics import weighted_recall_at_k
 from otto_recsys.ranking.xgboost_ranker import train_ranker
 
-IDENTIFIER_COLUMNS = frozenset(("session", "target", "aid", "label"))
+IDENTIFIER_COLUMNS = frozenset(("session", "target", "aid", "label", "query_group"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,12 +26,21 @@ class RankerSuiteResult:
     weighted_recall_at_20: float
 
 
+@dataclass(frozen=True, slots=True)
+class RefitSuiteResult:
+    training_rows: dict[str, int]
+
+
 def _read_target(
     path: Path,
     target: EventType,
     limit: int,
     *,
     keep_positives: bool,
+    query_limit: int | None,
+    require_positive_query: bool,
+    seed: int = 2026,
+    negative_sample_rate: float | None = None,
 ) -> pl.DataFrame:
     frame = pl.scan_parquet(path / target.value / "*.parquet")
     if "candidate_rank" in frame.collect_schema().names():
@@ -39,6 +48,23 @@ def _read_target(
         if keep_positives:
             predicate = predicate | (pl.col("label") > 0)
         frame = frame.filter(predicate)
+    if query_limit is not None:
+        queries = frame.group_by("session").agg(pl.col("label").sum().alias("positives"))
+        if require_positive_query:
+            queries = queries.filter(pl.col("positives") > 0)
+        selected = (
+            queries.select("session")
+            .with_columns(pl.col("session").hash(seed=seed).alias("sample_key"))
+            .sort("sample_key", "session")
+            .head(query_limit)
+            .select("session")
+            .collect()
+        )
+        frame = frame.join(selected.lazy(), on="session", how="semi")
+    if negative_sample_rate is not None and negative_sample_rate < 1.0:
+        threshold = int(negative_sample_rate * 10_000)
+        sample_key = pl.struct("session", "aid").hash(seed=seed) % 10_000
+        frame = frame.filter((pl.col("label") > 0) | (sample_key < threshold))
     return frame.sort("session").collect(engine="streaming")
 
 
@@ -52,8 +78,8 @@ def _positive_groups(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.join(sessions, on="session", how="inner").sort("session")
 
 
-def _group_sizes(frame: pl.DataFrame) -> list[int]:
-    return frame.group_by("session", maintain_order=True).len()["len"].to_list()
+def _group_sizes(frame: pl.DataFrame, column: str = "session") -> list[int]:
+    return frame.group_by(column, maintain_order=True).len()["len"].to_list()
 
 
 def _ground_truth(path: Path) -> dict[tuple[int, EventType], list[int]]:
@@ -80,10 +106,14 @@ def train_ranker_suite(
     rounds: int = 500,
     max_depth: int = 8,
     learning_rate: float = 0.08,
+    nthread: int = 8,
     seed: int = 2026,
     early_stopping_rounds: int = 30,
     training_candidate_limit: int = 80,
     validation_candidate_limit: int = 120,
+    training_query_limit: int | None = 50_000,
+    validation_query_limit: int | None = 50_000,
+    negative_sample_rates: dict[EventType, float] | None = None,
     overwrite: bool = False,
     progress: Callable[[int], None] | None = None,
 ) -> RankerSuiteResult:
@@ -97,6 +127,7 @@ def train_ranker_suite(
     training_rows: dict[str, int] = {}
     validation_rows: dict[str, int] = {}
     predictions: dict[tuple[int, EventType], list[int]] = {}
+    negative_sample_rates = negative_sample_rates or {target: 1.0 for target in EVENT_TYPES}
     try:
         for target in EVENT_TYPES:
             training = _positive_groups(
@@ -105,6 +136,10 @@ def train_ranker_suite(
                     target,
                     training_candidate_limit,
                     keep_positives=True,
+                    query_limit=training_query_limit,
+                    require_positive_query=True,
+                    seed=seed,
+                    negative_sample_rate=negative_sample_rates[target],
                 )
             )
             validation = _read_target(
@@ -112,6 +147,9 @@ def train_ranker_suite(
                 target,
                 validation_candidate_limit,
                 keep_positives=False,
+                query_limit=validation_query_limit,
+                require_positive_query=False,
+                seed=seed,
             )
             if training.is_empty() or validation.is_empty():
                 raise ValueError(f"Target {target.value} has no usable ranking rows")
@@ -140,6 +178,7 @@ def train_ranker_suite(
                 seed=seed,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
+                nthread=nthread,
                 early_stopping_rounds=early_stopping_rounds,
             )
             model.save(temporary / f"{target.value}.json")
@@ -152,15 +191,21 @@ def train_ranker_suite(
                 ["session", "score", "aid"],
                 descending=[False, True, False],
             )
-            for session_frame in ranked.partition_by("session", maintain_order=True):
-                session_id = int(session_frame["session"][0])
-                predictions[(session_id, target)] = session_frame["aid"].head(20).to_list()
+            for session_id, aid in ranked.select("session", "aid").iter_rows():
+                prediction = predictions.setdefault((int(session_id), target), [])
+                if len(prediction) < 20:
+                    prediction.append(int(aid))
             training_rows[target.value] = len(training)
             validation_rows[target.value] = len(validation)
             if progress is not None:
                 progress(1)
 
-        recall = weighted_recall_at_k(predictions, _ground_truth(validation_labels), k=20)
+        ground_truth = {
+            key: aids
+            for key, aids in _ground_truth(validation_labels).items()
+            if key in predictions
+        }
+        recall = weighted_recall_at_k(predictions, ground_truth, k=20)
         result = RankerSuiteResult(
             training_rows=training_rows,
             validation_rows=validation_rows,
@@ -175,9 +220,15 @@ def train_ranker_suite(
                     "rounds": rounds,
                     "max_depth": max_depth,
                     "learning_rate": learning_rate,
+                    "nthread": nthread,
                     "seed": seed,
                     "training_candidate_limit": training_candidate_limit,
                     "validation_candidate_limit": validation_candidate_limit,
+                    "training_query_limit": training_query_limit,
+                    "validation_query_limit": validation_query_limit,
+                    "negative_sample_rates": {
+                        target.value: negative_sample_rates[target] for target in EVENT_TYPES
+                    },
                 }
             ),
             "inputs": {
@@ -198,3 +249,112 @@ def train_ranker_suite(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def refit_ranker_suite(
+    candidate_sources: tuple[Path, ...],
+    destination: Path,
+    *,
+    device: str = "cpu",
+    rounds: int = 500,
+    max_depth: int = 8,
+    learning_rate: float = 0.08,
+    nthread: int = 8,
+    seed: int = 2026,
+    candidate_limit: int = 80,
+    query_limit: int = 50_000,
+    overwrite: bool = False,
+    progress: Callable[[int], None] | None = None,
+) -> RefitSuiteResult:
+    """Fit final target models from multiple temporal windows without test data."""
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {destination}")
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    if overwrite and temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir(parents=True, exist_ok=True)
+    training_rows: dict[str, int] = {}
+    per_source_limit = max(1, query_limit // len(candidate_sources))
+    for target in EVENT_TYPES:
+        model_path = temporary / f"{target.value}.json"
+        if model_path.exists() and model_path.with_suffix(".json.features.json").exists():
+            payload = json.loads(
+                (temporary / f"{target.value}.rows.json").read_text(encoding="utf-8")
+            )
+            training_rows[target.value] = int(payload["rows"])
+            if progress is not None:
+                progress(1)
+            continue
+        frames = [
+            _positive_groups(
+                _read_target(
+                    source,
+                    target,
+                    candidate_limit,
+                    keep_positives=True,
+                    query_limit=per_source_limit,
+                    require_positive_query=True,
+                )
+            ).with_columns(
+                pl.concat_str(pl.lit(source_index), pl.lit(":"), pl.col("session")).alias(
+                    "query_group"
+                )
+            )
+            for source_index, source in enumerate(candidate_sources)
+        ]
+        training = pl.concat(frames).sort("query_group")
+        if training.is_empty():
+            raise ValueError(f"Target {target.value} has no usable refit rows")
+        feature_names = tuple(
+            column for column in training.columns if column not in IDENTIFIER_COLUMNS
+        )
+        features = training.select(feature_names).to_numpy().astype(np.float32)
+        labels = training["label"].to_numpy().astype(np.float32)
+        model = train_ranker(
+            features,
+            labels,
+            _group_sizes(training, "query_group"),
+            feature_names,
+            device=device,
+            rounds=rounds,
+            seed=seed,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            nthread=nthread,
+        )
+        model.save(model_path)
+        training_rows[target.value] = len(training)
+        (temporary / f"{target.value}.rows.json").write_text(
+            json.dumps({"rows": len(training)}), encoding="utf-8"
+        )
+        if progress is not None:
+            progress(1)
+    result = RefitSuiteResult(training_rows=training_rows)
+    (temporary / "manifest.json").write_text(
+        json.dumps(
+            {
+                "stage": "ranker_refit",
+                "config_hash": stable_hash(
+                    {
+                        "candidate_sources": [str(path) for path in candidate_sources],
+                        "device": device,
+                        "nthread": nthread,
+                        "rounds": rounds,
+                        "max_depth": max_depth,
+                        "learning_rate": learning_rate,
+                        "seed": seed,
+                        "candidate_limit": candidate_limit,
+                        "query_limit": query_limit,
+                    }
+                ),
+                "result": asdict(result),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.move(str(temporary), str(destination))
+    return result

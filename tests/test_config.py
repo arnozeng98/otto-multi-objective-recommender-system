@@ -10,4 +10,7 @@ def test_smoke_config_inherits_base() -> None:
     assert config.ranking.device == "cpu"
     assert config.ranking.rounds == 20
     assert config.candidates.total_budget == 250
+    assert config.covisitation.profile == "public_v575"
+    assert config.validation.strategy == "official_random_event"
+    assert config.validation.minimum_rules_recall_at_20 == 0.54
     assert config.validation.training_cutoff_timestamp_ms < config.validation.cutoff_timestamp_ms

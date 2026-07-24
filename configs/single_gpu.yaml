@@ -3,6 +3,13 @@ extends: base.yaml
 project:
   artifacts_dir: artifacts/single_gpu
 
+candidates:
+  workers: 4
+  chunk_sessions: 500
+
+covisitation:
+  reduction_workers: 2
+
 ranking:
   device: cuda
 

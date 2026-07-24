@@ -19,10 +19,12 @@ from otto_recsys.covisitation import (
     default_rules,
 )
 from otto_recsys.data.materialize import (
+    materialize_official_validation_views,
     materialize_temporal_split,
     materialize_validation_views,
 )
 from otto_recsys.data.preprocess import convert_jsonl_to_parquet
+from otto_recsys.full_pipeline import run_full_pipeline
 from otto_recsys.pipeline import run_validation_pipeline
 from otto_recsys.ranking import train_ranker_suite
 from otto_recsys.smoke import run_smoke
@@ -120,14 +122,24 @@ def prepare_validation_command(
 ) -> None:
     """Materialize ranker-training and local-validation temporal views."""
     config = load_config(config_path)
-    result = materialize_validation_views(
-        source,
-        destination,
-        config.validation.training_cutoff_timestamp_ms,
-        config.validation.cutoff_timestamp_ms,
-        batch_rows=batch_rows,
-        overwrite=overwrite,
-    )
+    if config.validation.strategy == "official_random_event":
+        result = materialize_official_validation_views(
+            source,
+            destination,
+            validation_days=config.validation.days,
+            seed=config.validation.seed,
+            batch_rows=batch_rows,
+            overwrite=overwrite,
+        )
+    else:
+        result = materialize_validation_views(
+            source,
+            destination,
+            config.validation.training_cutoff_timestamp_ms,
+            config.validation.cutoff_timestamp_ms,
+            batch_rows=batch_rows,
+            overwrite=overwrite,
+        )
     typer.echo(json.dumps(asdict(result), indent=2))
 
 
@@ -164,6 +176,7 @@ def build_covisitation_suite_command(
     partitions: int = typer.Option(64, min=1),
     pair_buffer_size: int = typer.Option(500_000, min=1),
     batch_rows: int = typer.Option(250_000, min=1),
+    reduction_workers: int = typer.Option(1, min=1),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     """Build all five default co-visitation matrices."""
@@ -174,6 +187,7 @@ def build_covisitation_suite_command(
         partitions=partitions,
         pair_buffer_size=pair_buffer_size,
         batch_rows=batch_rows,
+        reduction_workers=reduction_workers,
         overwrite=overwrite,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
@@ -207,6 +221,11 @@ def materialize_candidates_command(
         destination,
         budget=config.candidates.total_budget,
         popularity_budget=config.candidates.popularity_budget,
+        history_budget=config.candidates.history_budget,
+        covisitation_budget=config.candidates.covisitation_budget,
+        max_events_per_session=config.covisitation.max_events_per_session,
+        workers=config.candidates.workers,
+        chunk_sessions=config.candidates.chunk_sessions,
         batch_rows=batch_rows,
         overwrite=overwrite,
     )
@@ -233,9 +252,12 @@ def train_rankers_command(
         rounds=config.ranking.rounds,
         max_depth=config.ranking.max_depth,
         learning_rate=config.ranking.learning_rate,
+        nthread=config.ranking.nthread,
         seed=config.project.seed,
         training_candidate_limit=config.ranking.training_candidate_limit,
         validation_candidate_limit=config.ranking.validation_candidate_limit,
+        training_query_limit=config.ranking.training_query_limit,
+        validation_query_limit=config.ranking.validation_query_limit,
         overwrite=overwrite,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
@@ -249,6 +271,7 @@ def run_validation_command(
     max_sessions: int | None = typer.Option(None, min=1),
     overwrite: bool = typer.Option(False, "--overwrite"),
     no_progress: bool = typer.Option(False, "--no-progress"),
+    allow_low_score: bool = typer.Option(False, "--allow-low-score"),
 ) -> None:
     """Run or resume the complete classical local-validation pipeline."""
     result = run_validation_pipeline(
@@ -258,27 +281,44 @@ def run_validation_command(
         max_sessions=max_sessions,
         overwrite=overwrite,
         show_progress=not no_progress,
+        allow_low_score=allow_low_score,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
 
 
 @app.command("run")
 def run_command(
-    source: Annotated[Path, typer.Argument()],
     destination: Annotated[Path, typer.Argument()],
+    train: Annotated[Path, typer.Option("--train")] = Path("data/train.jsonl"),
+    test: Annotated[Path, typer.Option("--test")] = Path("data/test.jsonl"),
+    sample_submission: Annotated[Path, typer.Option("--sample-submission")] = Path(
+        "data/sample_submission.csv"
+    ),
+    validation_run: Annotated[Path | None, typer.Option("--validation-run")] = None,
     config_path: Annotated[Path, typer.Option("--config")] = Path("configs/single_gpu.yaml"),
-    max_sessions: int | None = typer.Option(None, min=1),
+    model_strategy: Annotated[str | None, typer.Option("--model-strategy")] = None,
     overwrite: bool = typer.Option(False, "--overwrite"),
     no_progress: bool = typer.Option(False, "--no-progress"),
+    allow_low_score: bool = typer.Option(False, "--allow-low-score"),
 ) -> None:
-    """Run or resume the complete nine-stage recommendation pipeline."""
-    result = run_validation_pipeline(
-        source,
+    """Run or resume training, test inference, and Kaggle submission output."""
+    config = load_config(config_path)
+    if model_strategy is not None:
+        if model_strategy not in {"validated", "refit"}:
+            raise typer.BadParameter("model strategy must be 'validated' or 'refit'")
+        config = config.model_copy(
+            update={"ranking": config.ranking.model_copy(update={"model_strategy": model_strategy})}
+        )
+    result = run_full_pipeline(
         destination,
-        load_config(config_path),
-        max_sessions=max_sessions,
+        config,
+        train=train,
+        test=test,
+        sample_submission=sample_submission,
+        validation_run=validation_run,
         overwrite=overwrite,
         show_progress=not no_progress,
+        allow_low_score=allow_low_score,
     )
     typer.echo(json.dumps(asdict(result), indent=2))
 
